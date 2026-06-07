@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/f4kvs-core",
+    "crates/f4kvs-storage-core",
+    "crates/f4kvs-storage-lsm",
+    "crates/f4kvs-ffi",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Baptiste Boussemart <contact@f4kvs.dev>"]
+license = "Apache-2.0"
+repository = "https://github.com/f4kvs/f4kvs-ffi"
+homepage = "https://f4kvs.dev"
+keywords = ["key-value", "storage", "database", "lsm-tree", "ffi"]
+categories = ["database", "storage"]
+
+[workspace.dependencies]
+f4kvs-core = { path = "crates/f4kvs-core", version = "0.2.0" }
+f4kvs-storage-core = { path = "crates/f4kvs-storage-core", version = "0.2.0" }
+f4kvs-storage-lsm = { path = "crates/f4kvs-storage-lsm", version = "0.2.0" }
+f4kvs-ffi = { path = "crates/f4kvs-ffi", version = "0.2.0" }
+
+tokio = { version = "1.48", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+bytes = "1.11"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+tempfile = "3.5"
+futures = "0.3"
+bincode = { version = "2", features = ["serde"] }
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.bench]
+inherits = "release"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.test]
+opt-level = 0
+debug = true
+
+[workspace.lints.rust]
+unused_imports = "deny"
+dead_code = "warn"
+unused_variables = "warn"
+unused_mut = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

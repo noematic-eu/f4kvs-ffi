@@ -1,0 +1,228 @@
+[package]
+name = "f4kvs-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "F4KVS core key-value store engine — in-memory storage and shared primitives"
+keywords = ["database", "key-value", "storage", "async"]
+categories = ["database-implementations"]
+
+[lib]
+name = "f4kvs_core"
+path = "src/lib.rs"
+
+[dependencies]
+# ============================================================================
+# Core Runtime Dependencies
+# ============================================================================
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+async-trait = "0.1.83"
+
+# Required for safe concurrency (always enabled)
+crossbeam = { version = "0.8" }
+dashmap = { version = "5.5" }
+
+# ============================================================================
+# Serialization & Configuration
+# ============================================================================
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+simd-json = "0.14.0-rc.3"
+bincode = { workspace = true, optional = true }
+toml = { version = "0.8", optional = true }
+
+# ============================================================================
+# Error Handling & Logging
+# ============================================================================
+thiserror = { version = "1.0", optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = ">=0.3.20", optional = true }
+log = { version = "0.4", optional = true }
+
+# ============================================================================
+# Security & Cryptography
+# ============================================================================
+# Encryption algorithms
+aes-gcm = { version = "0.10", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+# Key derivation
+argon2 = { version = "0.5", optional = true }
+sha2 = { version = "0.10", optional = true }
+# Authentication
+base64 = { version = "0.22", optional = true }
+
+# ============================================================================
+# Compression
+# ============================================================================
+lz4 = { version = "1.24", optional = true }
+zstd = { version = "0.13", optional = true }
+flate2 = { version = "1.0", optional = true }
+snap = { version = "1.1", optional = true }
+
+# ============================================================================
+# Utilities
+# ============================================================================
+uuid = { workspace = true, features = ["v4"], optional = true }
+chrono = { version = "0.4", features = ["serde"], optional = true }
+tempfile = { workspace = true, optional = true }
+rand = { version = "0.8", optional = true }
+proptest = { version = "1.3", optional = true }
+
+# Phase 3B: Unified Observability System - REMOVED to avoid circular dependencies
+# f4kvs-observability = { workspace = true, optional = true }
+
+# ============================================================================
+# Performance Optimizations
+# ============================================================================
+memchr = { version = "2.7", optional = true }
+libc = "0.2"
+
+# ============================================================================
+# Testing & Development Dependencies
+# ============================================================================
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile = { workspace = true }
+futures = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+# Fuzzing
+arbitrary = "1.4"
+fastrand = "2.0"
+
+# Property-based testing
+proptest = "1.3"
+
+# ============================================================================
+# Feature Flags
+# ============================================================================
+[features]
+default = ["std"]
+
+# Core feature sets
+embedded = ["serde", "thiserror"]
+std = [
+    "file-storage",
+    "tracing",
+    "log",
+    "serde",
+    "thiserror",
+    "serde_json",
+    "bincode",
+    "toml",
+    "auth",
+    "encryption",
+    "rbac",
+    "security",
+    "chrono",
+    "uuid",
+]
+full = ["std", "tracing-subscriber", "uuid"]
+
+# Storage
+file-storage = ["tempfile"]
+
+# Security features
+encryption = ["aes-gcm", "chacha20poly1305", "argon2", "sha2", "rand"]
+rbac = []
+security = ["encryption", "rbac"]
+auth = ["base64"]
+
+# Compression features
+lz4 = ["dep:lz4"]
+zstd = ["dep:zstd"]
+
+# Phase 3B: Unified Observability System - REMOVED to avoid circular dependencies
+# observability = ["f4kvs-observability"]
+gzip = ["dep:flate2"]
+snappy = ["dep:snap"]
+compression = ["lz4", "zstd", "gzip", "snappy"]
+
+# Performance features
+safe-simd = ["dep:memchr"]
+memchr = ["dep:memchr"]
+
+# Testing features
+proptest = ["dep:proptest"]
+
+# Platform-specific features (currently unused, reserved for future use)
+linux-specific = []
+macos-specific = []
+windows-specific = []
+platform-specific = ["linux-specific", "macos-specific", "windows-specific"]
+
+# ============================================================================
+# Benchmarks
+# ============================================================================
+# Benchmarks commented out - files not migrated yet
+# [[bench]]
+# name = "benchmarks"
+# path = "benches/benchmarks.rs"
+# harness = false
+#
+# [[bench]]
+# name = "performance_benchmarks"
+# path = "benches/performance_benchmarks.rs"
+# harness = false
+#
+# [[bench]]
+# name = "simple_benchmark"
+# path = "benches/simple_benchmark.rs"
+# harness = false
+#
+# [[bench]]
+# name = "lockfree_benchmarks"
+# path = "benches/lockfree_benchmarks.rs"
+# harness = false
+#
+# [[bench]]
+# name = "comprehensive_benchmarks"
+# path = "benches/comprehensive_benchmarks.rs"
+# harness = false
+#
+# [[bench]]
+# name = "memory_profiling"
+# path = "benches/memory_profiling.rs"
+# harness = false
+#
+# [[bench]]
+# name = "optimization_verification"
+# path = "benches/optimization_verification.rs"
+# harness = false
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
+[[test]]
+name = "lockfree_integration_tests"
+path = "tests/lockfree_integration_tests.rs"
+
+[[test]]
+name = "simd_integration_tests"
+path = "tests/simd_integration_tests.rs"
+
+[[test]]
+name = "storage_backend_integration_tests"
+path = "tests/storage_backend_integration_tests.rs"
+
+[[test]]
+name = "memory_pool_integration_tests"
+path = "tests/memory_pool_integration_tests.rs"
+
+[[test]]
+name = "ffi_integration_tests"
+path = "tests/ffi_integration_tests.rs"
+
+# ============================================================================
+# Fuzzing Configuration
+# ============================================================================
+[package.metadata.fuzz]
+targets = ["key_operations", "value_operations", "storage_operations"]
+# Note: Fuzz targets are handled by the separate fuzz workspace
+
+[lints]
+workspace = true

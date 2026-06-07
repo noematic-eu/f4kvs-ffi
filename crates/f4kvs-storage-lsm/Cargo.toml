@@ -1,0 +1,69 @@
+[package]
+name = "f4kvs-storage-lsm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "LSM-tree storage engine for F4KVS"
+
+[dependencies]
+# Core F4KVS packages
+f4kvs-core = { workspace = true }
+f4kvs-storage-core = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "fs", "io-util"] }
+async-trait = "0.1.83"
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+bincode = "1.3"
+
+# Data structures and utilities
+bytes = { workspace = true }
+thiserror = "1.0"
+dashmap = "5.5"
+crossbeam = "0.8"
+
+# Storage and file system
+tempfile = { workspace = true }
+
+# Metrics and observability
+tracing = { workspace = true }
+log = "0.4"
+
+# Time handling
+chrono = { workspace = true, features = ["serde"] }
+
+# Checksum support for data integrity
+crc32fast = "1.3"
+
+[features]
+default = []
+ttl = []
+metrics = []
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile.workspace = true
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
+serde_json.workspace = true
+proptest = "1.5"
+
+[lib]
+name = "f4kvs_storage_lsm"
+path = "src/lib.rs"
+
+# Benchmark commented out - file not migrated yet
+# [[bench]]
+# name = "lsm_benchmarks"
+# path = "benches/lsm_benchmarks.rs"
+# harness = false
+
+[lints]
+workspace = true

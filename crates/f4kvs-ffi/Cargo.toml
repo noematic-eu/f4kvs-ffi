@@ -1,0 +1,26 @@
+[package]
+name = "f4kvs-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+description = "F4KVS FFI bindings — C ABI for the LSM key-value store"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+f4kvs-core = { workspace = true }
+f4kvs-storage-core = { workspace = true }
+f4kvs-storage-lsm = { workspace = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[lints]
+workspace = true
