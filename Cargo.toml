@@ -1,9 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/f4kvs-core",
-    "crates/f4kvs-storage-core",
-    "crates/f4kvs-storage-lsm",
     "crates/f4kvs-ffi",
 ]
 
@@ -19,9 +16,9 @@ keywords = ["key-value", "storage", "database", "lsm-tree", "ffi"]
 categories = ["database", "storage"]
 
 [workspace.dependencies]
-f4kvs-core = { path = "crates/f4kvs-core", version = "0.2.0" }
-f4kvs-storage-core = { path = "crates/f4kvs-storage-core", version = "0.2.0" }
-f4kvs-storage-lsm = { path = "crates/f4kvs-storage-lsm", version = "0.2.0" }
+f4kvs-value = { path = "../f4kvs-lsm/crates/f4kvs-value", version = "0.3.0" }
+f4kvs-storage-core = { path = "../f4kvs-lsm/crates/f4kvs-storage-core", version = "0.3.0" }
+f4kvs-lsm = { path = "../f4kvs-lsm/crates/f4kvs-lsm", version = "0.3.0" }
 f4kvs-ffi = { path = "crates/f4kvs-ffi", version = "0.2.0" }
 
 tokio = { version = "1.48", features = ["full"] }

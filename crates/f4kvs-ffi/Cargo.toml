@@ -14,9 +14,9 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-f4kvs-core = { workspace = true }
+f4kvs-value = { workspace = true }
 f4kvs-storage-core = { workspace = true }
-f4kvs-storage-lsm = { workspace = true }
+f4kvs-lsm = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 
 [dev-dependencies]
