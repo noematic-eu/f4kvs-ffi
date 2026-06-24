@@ -7,7 +7,8 @@ use f4kvs_storage_core::traits::StorageEngine;
 use f4kvs_value::Value;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_uint, c_uchar};
+use std::time::Duration;
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -67,10 +68,43 @@ fn unique_data_dir() -> PathBuf {
     std::env::temp_dir().join(format!("f4kvs_ffi_{}_{}", std::process::id(), id))
 }
 
-fn open_lsm_engine(data_dir: PathBuf) -> Result<F4KvsEngine, F4KvsResult> {
+/// FFI mirror of `F4KvsOpenOptions` from f4kvs.h
+#[repr(C)]
+pub struct F4KvsOpenOptions {
+    pub group_commit_enabled: c_uchar,
+    pub group_commit_max_wait_ms: c_uint,
+    pub group_commit_max_batch_size: c_uint,
+    pub group_commit_wait_durable: c_uchar,
+}
+
+fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>) {
+    let Some(options) = options else {
+        return;
+    };
+
+    if options.group_commit_enabled != 0 {
+        config.wal.group_commit_enabled = true;
+    }
+    if options.group_commit_max_wait_ms > 0 {
+        config.wal.group_commit_max_wait =
+            Duration::from_millis(options.group_commit_max_wait_ms as u64);
+    }
+    if options.group_commit_max_batch_size > 0 {
+        config.wal.group_commit_max_batch_size = options.group_commit_max_batch_size as usize;
+    }
+    if options.group_commit_wait_durable != 0 {
+        config.wal.group_commit_wait_durable = true;
+    }
+}
+
+fn open_lsm_engine(
+    data_dir: PathBuf,
+    options: Option<&F4KvsOpenOptions>,
+) -> Result<F4KvsEngine, F4KvsResult> {
     let mut config = LsmConfig::default();
     config.data_dir = data_dir.clone();
     config.wal.dir = data_dir.join("wal");
+    apply_open_options(&mut config, options);
 
     let engine = runtime()
         .block_on(LsmTreeEngine::new(config))
@@ -321,7 +355,7 @@ fn allocate_bytes(value: Vec<u8>) -> Result<(*mut u8, usize), F4KvsResult> {
 /// The returned pointer must be freed with `f4kvs_engine_free`.
 #[no_mangle]
 pub unsafe extern "C" fn f4kvs_engine_new() -> *mut F4KvsEngine {
-    match open_lsm_engine(unique_data_dir()) {
+    match open_lsm_engine(unique_data_dir(), None) {
         Ok(engine) => Box::into_raw(Box::new(engine)),
         Err(e) => {
             set_last_error(&format!("Failed to create engine: {:?}", e));
@@ -341,7 +375,36 @@ pub unsafe extern "C" fn f4kvs_engine_open(data_dir: *const c_char) -> *mut F4Kv
         Err(_) => return ptr::null_mut(),
     };
 
-    match open_lsm_engine(path) {
+    match open_lsm_engine(path, None) {
+        Ok(engine) => Box::into_raw(Box::new(engine)),
+        Err(e) => {
+            set_last_error(&format!("Failed to open engine: {:?}", e));
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Open a persistent F4KVS engine with optional WAL tuning.
+///
+/// # Safety
+/// `data_dir` must be a valid null-terminated C string. `options` may be NULL.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_open_ex(
+    data_dir: *const c_char,
+    options: *const F4KvsOpenOptions,
+) -> *mut F4KvsEngine {
+    let path = match validate_data_dir(data_dir) {
+        Ok(path) => path,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    let opts = if options.is_null() {
+        None
+    } else {
+        Some(&*options)
+    };
+
+    match open_lsm_engine(path, opts) {
         Ok(engine) => Box::into_raw(Box::new(engine)),
         Err(e) => {
             set_last_error(&format!("Failed to open engine: {:?}", e));
@@ -398,6 +461,138 @@ pub unsafe extern "C" fn f4kvs_engine_compact(engine: *mut F4KvsEngine) -> F4Kvs
             set_last_error(&format!("Compact failed: {}", e));
             F4KvsResult::ErrorStorage
         }
+    }
+}
+
+/// Flush pending WAL and memtable writes.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `f4kvs_engine_new` or `f4kvs_engine_open`.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_flush(engine: *mut F4KvsEngine) -> F4KvsResult {
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+
+    match runtime().block_on(engine_ref.engine.flush()) {
+        Ok(_) => F4KvsResult::Success,
+        Err(e) => {
+            set_last_error(&format!("Flush failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+    }
+}
+
+/// Flush WAL buffers without flushing memtable to SSTable.
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `f4kvs_engine_new` or `f4kvs_engine_open`.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_flush_wal(engine: *mut F4KvsEngine) -> F4KvsResult {
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+
+    match runtime().block_on(engine_ref.engine.flush_wal()) {
+        Ok(_) => F4KvsResult::Success,
+        Err(e) => {
+            set_last_error(&format!("Flush WAL failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+    }
+}
+
+/// Key-only prefix scan result container.
+#[repr(C)]
+pub struct F4KvsKeyScanResult {
+    pub keys: *mut *mut c_char,
+    pub count: usize,
+}
+
+/// Scan keys by prefix without loading values.
+///
+/// # Safety
+/// `prefix` and `result_out` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_scan_prefix_keys(
+    engine: *mut F4KvsEngine,
+    prefix: *const c_char,
+    result_out: *mut F4KvsKeyScanResult,
+) -> F4KvsResult {
+    if result_out.is_null() {
+        set_last_error("Invalid argument: result_out is null");
+        return F4KvsResult::ErrorInvalidArgument;
+    }
+
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+
+    let prefix_str = match validate_c_string(prefix, MAX_KEY_LENGTH, "prefix") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    match runtime().block_on(engine_ref.engine.scan_prefix(&prefix_str)) {
+        Ok(keys) => {
+            let count = keys.len();
+            if count == 0 {
+                (*result_out).keys = ptr::null_mut();
+                (*result_out).count = 0;
+                return F4KvsResult::Success;
+            }
+
+            let mut key_ptrs: Vec<*mut c_char> = Vec::with_capacity(count);
+            for key in keys {
+                match allocate_c_string(key) {
+                    Ok(ptr) => key_ptrs.push(ptr),
+                    Err(e) => {
+                        for ptr in key_ptrs {
+                            f4kvs_string_free(ptr);
+                        }
+                        return e;
+                    }
+                }
+            }
+
+            let mut boxed = key_ptrs.into_boxed_slice();
+            let ptr = boxed.as_mut_ptr();
+            std::mem::forget(boxed);
+
+            (*result_out).keys = ptr;
+            (*result_out).count = count;
+            F4KvsResult::Success
+        }
+        Err(e) => {
+            set_last_error(&format!("Scan prefix keys failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+    }
+}
+
+/// Free a key-only scan result.
+///
+/// # Safety
+/// `result` must be a pointer to a result filled by `f4kvs_engine_scan_prefix_keys`.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_key_scan_result_free(result: *mut F4KvsKeyScanResult) {
+    if result.is_null() {
+        return;
+    }
+
+    let scan = &mut *result;
+    if !scan.keys.is_null() && scan.count > 0 {
+        let keys = std::slice::from_raw_parts_mut(scan.keys, scan.count);
+        for key in keys {
+            f4kvs_string_free(*key);
+        }
+        let keys_boxed = std::slice::from_raw_parts_mut(scan.keys, scan.count);
+        let _ = Box::from_raw(keys_boxed);
+        scan.keys = ptr::null_mut();
+        scan.count = 0;
     }
 }
 

@@ -25,6 +25,15 @@ type F4KVS struct {
 	closed bool
 }
 
+// OpenOptions tunes WAL behavior when opening a persistent engine.
+// Zero values select library defaults.
+type OpenOptions struct {
+	GroupCommitEnabled      bool
+	GroupCommitMaxWaitMs    uint32
+	GroupCommitMaxBatchSz   uint32
+	GroupCommitWaitDurable  bool
+}
+
 // NewMemoryEngine opens an ephemeral engine in a temporary directory.
 func NewMemoryEngine() (*F4KVS, error) {
 	handle := C.f4kvs_engine_new()
@@ -36,10 +45,32 @@ func NewMemoryEngine() (*F4KVS, error) {
 
 // NewPersistentEngine opens a persistent engine at path.
 func NewPersistentEngine(path string) (*F4KVS, error) {
+	return NewPersistentEngineWithOptions(path, nil)
+}
+
+// NewPersistentEngineWithOptions opens a persistent engine with WAL tuning.
+func NewPersistentEngineWithOptions(path string, opts *OpenOptions) (*F4KVS, error) {
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
 
-	handle := C.f4kvs_engine_open(cpath)
+	var handle *C.F4KvsEngine
+	if opts == nil {
+		handle = C.f4kvs_engine_open(cpath)
+	} else {
+		copts := C.F4KvsOpenOptions{
+			group_commit_enabled:        0,
+			group_commit_max_wait_ms:    C.uint(opts.GroupCommitMaxWaitMs),
+			group_commit_max_batch_size: C.uint(opts.GroupCommitMaxBatchSz),
+			group_commit_wait_durable:   0,
+		}
+		if opts.GroupCommitEnabled {
+			copts.group_commit_enabled = 1
+		}
+		if opts.GroupCommitWaitDurable {
+			copts.group_commit_wait_durable = 1
+		}
+		handle = C.f4kvs_engine_open_ex(cpath, &copts)
+	}
 	if handle == nil {
 		return nil, fmt.Errorf("f4kvs open %s: %s", path, lastError())
 	}
@@ -265,6 +296,33 @@ func (e *F4KVS) BatchDelete(keys []string) error {
 	return nil
 }
 
+func (e *F4KVS) Flush() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed || e.handle == nil {
+		return ErrClosed
+	}
+	res := C.f4kvs_engine_flush(e.handle)
+	if res != C.F4KVS_SUCCESS {
+		return fmt.Errorf("f4kvs flush: %s", lastError())
+	}
+	return nil
+}
+
+// FlushWAL drains the group-commit queue and syncs WAL segments without flushing memtable to SSTable.
+func (e *F4KVS) FlushWAL() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed || e.handle == nil {
+		return ErrClosed
+	}
+	res := C.f4kvs_engine_flush_wal(e.handle)
+	if res != C.F4KVS_SUCCESS {
+		return fmt.Errorf("f4kvs flush wal: %s", lastError())
+	}
+	return nil
+}
+
 func (e *F4KVS) Sync() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -294,17 +352,19 @@ func scanPrefixLocked(e *F4KVS, prefix string) []string {
 	cprefix := C.CString(prefix)
 	defer C.free(unsafe.Pointer(cprefix))
 
-	var result C.F4KvsScanResult
-	res := C.f4kvs_engine_scan_prefix(e.handle, cprefix, &result)
+	var result C.F4KvsKeyScanResult
+	res := C.f4kvs_engine_scan_prefix_keys(e.handle, cprefix, &result)
 	if res != C.F4KVS_SUCCESS {
 		return nil
 	}
-	defer C.f4kvs_scan_result_free(&result)
+	defer C.f4kvs_key_scan_result_free(&result)
 
 	keys := make([]string, 0, int(result.count))
-	for i := 0; i < int(result.count); i++ {
-		pair := (*[1 << 30]C.F4KvsKVPair)(unsafe.Pointer(result.pairs))[i]
-		keys = append(keys, C.GoString(pair.key))
+	if result.keys != nil && result.count > 0 {
+		slice := (*[1 << 30]*C.char)(unsafe.Pointer(result.keys))[:result.count:result.count]
+		for _, key := range slice {
+			keys = append(keys, C.GoString(key))
+		}
 	}
 	return keys
 }

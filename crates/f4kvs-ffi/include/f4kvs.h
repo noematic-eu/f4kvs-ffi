@@ -67,6 +67,20 @@ typedef enum {
 /** @brief Opaque handle to an LSM-backed F4KVS engine. */
 typedef struct F4KvsEngine F4KvsEngine;
 
+/**
+ * Optional engine open parameters. Zero values select library defaults.
+ */
+typedef struct {
+    /** 1 to enable WAL group commit for single puts/deletes; 0 = disabled. */
+    uint8_t group_commit_enabled;
+    /** Max group-commit wait in milliseconds (0 = default 10 ms). */
+    uint32_t group_commit_max_wait_ms;
+    /** Max buffered entries before forced flush (0 = default 1000). */
+    uint32_t group_commit_max_batch_size;
+    /** 1 = block until entry is fsynced in batch; 0 = return after enqueue (default). */
+    uint8_t group_commit_wait_durable;
+} F4KvsOpenOptions;
+
 /** @brief Key-value pair returned by prefix scans. */
 typedef struct {
     char *key;          /**< Allocated by the library; free with f4kvs_string_free(). */
@@ -95,6 +109,12 @@ F4KvsEngine *f4kvs_engine_new(void);
 F4KvsEngine *f4kvs_engine_open(const char *data_dir);
 
 /**
+ * Open a persistent engine with optional WAL tuning.
+ * @param options NULL for defaults (same as f4kvs_engine_open).
+ */
+F4KvsEngine *f4kvs_engine_open_ex(const char *data_dir, const F4KvsOpenOptions *options);
+
+/**
  * Flush pending writes and shut down the engine.
  * @param engine Valid engine handle.
  */
@@ -111,6 +131,28 @@ void f4kvs_engine_free(F4KvsEngine *engine);
  * @param engine Valid engine handle.
  */
 F4KvsResult f4kvs_engine_compact(F4KvsEngine *engine);
+
+/** Flush pending WAL/memtable writes (including group-commit queue). */
+F4KvsResult f4kvs_engine_flush(F4KvsEngine *engine);
+
+/** Flush WAL only (group-commit queue + segment); does not flush memtable to SSTable. */
+F4KvsResult f4kvs_engine_flush_wal(F4KvsEngine *engine);
+
+/** Key-only prefix scan result (no values loaded). */
+typedef struct {
+    char **keys;
+    size_t count;
+} F4KvsKeyScanResult;
+
+/**
+ * Scan keys with prefix; does not load values (faster than f4kvs_engine_scan_prefix).
+ * Free with f4kvs_key_scan_result_free().
+ */
+F4KvsResult f4kvs_engine_scan_prefix_keys(F4KvsEngine *engine, const char *prefix,
+                                          F4KvsKeyScanResult *result_out);
+
+/** Free keys returned by f4kvs_engine_scan_prefix_keys(). */
+void f4kvs_key_scan_result_free(F4KvsKeyScanResult *result);
 
 /**
  * Store a string key-value pair.
