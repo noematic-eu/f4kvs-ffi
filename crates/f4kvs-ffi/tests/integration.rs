@@ -246,3 +246,42 @@ fn test_complex_value_types() {
         f4kvs_engine_free(engine);
     }
 }
+
+#[test]
+fn test_batch_put_bytes_workflow() {
+    unsafe {
+        let engine = f4kvs_engine_new();
+        assert!(!engine.is_null());
+
+        let keys = [
+            to_c_string("chunk:doc-0001:chunk-000001"),
+            to_c_string("chunk:doc-0001:chunk-000002"),
+            to_c_string("chunk:doc-0002:chunk-000001"),
+        ];
+        let values: [&[u8]; 3] = [b"payload-a", b"payload-b", b"payload-c"];
+        let key_ptrs: Vec<*const c_char> = keys.iter().map(|k| k.as_ptr()).collect();
+        let value_ptrs: Vec<*const u8> = values.iter().map(|v| v.as_ptr()).collect();
+        let value_lens: Vec<usize> = values.iter().map(|v| v.len()).collect();
+
+        let result = f4kvs_engine_batch_put_bytes(
+            engine,
+            key_ptrs.as_ptr(),
+            value_ptrs.as_ptr(),
+            value_lens.as_ptr(),
+            keys.len(),
+        );
+        assert_eq!(result, F4KvsResult::Success);
+
+        for (i, key) in keys.iter().enumerate() {
+            let mut value_out: *mut u8 = std::ptr::null_mut();
+            let mut value_len: usize = 0;
+            let result = f4kvs_engine_get_bytes(engine, key.as_ptr(), &mut value_out, &mut value_len);
+            assert_eq!(result, F4KvsResult::Success);
+            let retrieved = std::slice::from_raw_parts(value_out, value_len);
+            assert_eq!(retrieved, values[i]);
+            f4kvs_bytes_free(value_out);
+        }
+
+        f4kvs_engine_free(engine);
+    }
+}

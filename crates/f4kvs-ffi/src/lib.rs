@@ -488,6 +488,69 @@ pub unsafe extern "C" fn f4kvs_engine_put_bytes(
     }
 }
 
+/// Put multiple binary key-value pairs in one WAL batch.
+///
+/// # Safety
+/// `keys`, `values`, and `value_lens` must point to `count` valid elements when `count > 0`.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_batch_put_bytes(
+    engine: *mut F4KvsEngine,
+    keys: *const *const c_char,
+    values: *const *const u8,
+    value_lens: *const usize,
+    count: usize,
+) -> F4KvsResult {
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+
+    if count > 0 && (keys.is_null() || values.is_null() || value_lens.is_null()) {
+        set_last_error("Invalid argument: keys, values, or value_lens is null");
+        return F4KvsResult::ErrorInvalidArgument;
+    }
+
+    let mut items = Vec::with_capacity(count);
+    for i in 0..count {
+        let key_ptr = unsafe { *keys.add(i) };
+        let key_str = match validate_c_string(key_ptr, MAX_KEY_LENGTH, "key") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        let value_len = unsafe { *value_lens.add(i) };
+        if value_len > MAX_VALUE_LENGTH {
+            set_last_error(&format!(
+                "Invalid argument: value at index {} exceeds maximum length of {} bytes",
+                i, MAX_VALUE_LENGTH
+            ));
+            return F4KvsResult::ErrorInvalidArgument;
+        }
+
+        let value_ptr = unsafe { *values.add(i) };
+        if value_len > 0 && value_ptr.is_null() {
+            set_last_error(&format!("Invalid argument: value at index {} is null", i));
+            return F4KvsResult::ErrorInvalidArgument;
+        }
+
+        let bytes = if value_len == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(value_ptr, value_len).to_vec()
+        };
+
+        items.push((key_str, Value::Bytes(bytes)));
+    }
+
+    match runtime().block_on(engine_ref.engine.batch_put(items)) {
+        Ok(_) => F4KvsResult::Success,
+        Err(e) => {
+            set_last_error(&format!("Batch put bytes failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+    }
+}
+
 /// Get a value by key.
 ///
 /// # Safety

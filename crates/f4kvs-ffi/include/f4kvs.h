@@ -154,6 +154,17 @@ F4KvsResult f4kvs_engine_put_bytes(F4KvsEngine *engine, const char *key, const u
                                    size_t value_len);
 
 /**
+ * Store multiple binary key-value pairs in one durable WAL batch.
+ * @param keys       Array of count null-terminated key strings.
+ * @param values     Array of count value pointers (NULL when value_lens[i] is 0).
+ * @param value_lens Array of count value lengths in bytes (each ≤ 100 MB).
+ * @param count      Number of pairs (0 is allowed).
+ */
+F4KvsResult f4kvs_engine_batch_put_bytes(F4KvsEngine *engine, const char **keys,
+                                         const uint8_t **values, const size_t *value_lens,
+                                         size_t count);
+
+/**
  * Retrieve a binary value by key.
  * @param value_out     Output pointer; allocated on success, free with f4kvs_bytes_free().
  * @param value_len_out Output length in bytes.

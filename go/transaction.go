@@ -79,16 +79,25 @@ func (t *Transaction) Commit() error {
 		return ErrTxnRolledBack
 	}
 
+	puts := make(map[string][]byte)
+	deletes := make([]string, 0)
 	for key, op := range t.ops {
 		switch op.kind {
 		case opPut:
-			if err := t.engine.PutBytes(key, op.value); err != nil {
-				return fmt.Errorf("commit put %q: %w", key, err)
-			}
+			puts[key] = op.value
 		case opDelete:
-			if err := t.engine.Delete(key); err != nil {
-				return fmt.Errorf("commit delete %q: %w", key, err)
-			}
+			deletes = append(deletes, key)
+		}
+	}
+
+	if len(puts) > 0 {
+		if err := t.engine.BatchPutBytes(puts); err != nil {
+			return fmt.Errorf("commit batch put: %w", err)
+		}
+	}
+	if len(deletes) > 0 {
+		if err := t.engine.BatchDelete(deletes); err != nil {
+			return fmt.Errorf("commit batch delete: %w", err)
 		}
 	}
 

@@ -7,6 +7,7 @@ package f4kvs
 #cgo LDFLAGS: -L${SRCDIR}/../target/release -lf4kvs_ffi
 
 #include <stdlib.h>
+#include <string.h>
 #include "f4kvs.h"
 */
 import "C"
@@ -178,10 +179,60 @@ func (e *F4KVS) BatchGetBytes(keys []string) (map[string][]byte, error) {
 }
 
 func (e *F4KVS) BatchPutBytes(items map[string][]byte) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed || e.handle == nil {
+		return ErrClosed
+	}
+
+	keys := make([]string, 0, len(items))
+	values := make([][]byte, 0, len(items))
 	for key, value := range items {
-		if err := e.PutBytes(key, value); err != nil {
-			return err
+		keys = append(keys, key)
+		values = append(values, value)
+	}
+
+	cKeys := make([]*C.char, len(keys))
+	cValues := make([]*C.uint8_t, len(keys))
+	cLens := make([]C.size_t, len(keys))
+	for i, key := range keys {
+		cKeys[i] = C.CString(key)
+		value := values[i]
+		cLens[i] = C.size_t(len(value))
+		if len(value) == 0 {
+			continue
 		}
+		buf := C.malloc(C.size_t(len(value)))
+		if buf == nil {
+			return fmt.Errorf("f4kvs batch put: out of memory")
+		}
+		cValues[i] = (*C.uint8_t)(buf)
+		C.memcpy(buf, unsafe.Pointer(&value[0]), C.size_t(len(value)))
+	}
+	defer func() {
+		for _, ck := range cKeys {
+			C.free(unsafe.Pointer(ck))
+		}
+		for _, cv := range cValues {
+			if cv != nil {
+				C.free(unsafe.Pointer(cv))
+			}
+		}
+	}()
+
+	res := C.f4kvs_engine_batch_put_bytes(
+		e.handle,
+		(**C.char)(unsafe.Pointer(&cKeys[0])),
+		(**C.uint8_t)(unsafe.Pointer(&cValues[0])),
+		(*C.size_t)(unsafe.Pointer(&cLens[0])),
+		C.size_t(len(keys)),
+	)
+	if res != C.F4KVS_SUCCESS {
+		return fmt.Errorf("f4kvs batch put: %s", lastError())
 	}
 	return nil
 }
