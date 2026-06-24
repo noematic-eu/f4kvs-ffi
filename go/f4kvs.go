@@ -131,12 +131,17 @@ func (e *F4KVS) Delete(key string) error {
 }
 
 func (e *F4KVS) GetAllKeys() []string {
+	return e.ScanPrefixKeys("")
+}
+
+// ScanPrefixKeys returns keys with the given prefix.
+func (e *F4KVS) ScanPrefixKeys(prefix string) []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed || e.handle == nil {
 		return nil
 	}
-	return scanPrefixLocked(e, "")
+	return scanPrefixLocked(e, prefix)
 }
 
 func (e *F4KVS) BatchPut(items map[string]string) error {

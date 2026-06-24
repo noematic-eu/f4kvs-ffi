@@ -74,6 +74,16 @@ make test    # cargo test -p f4kvs-ffi
 
 Header: [`crates/f4kvs-ffi/include/f4kvs.h`](crates/f4kvs-ffi/include/f4kvs.h)
 
+## Benchmark vs SQLite
+
+Product-shaped workloads (memoir blobs, RAG chunk ingest, prefix scan, random gets):
+
+```bash
+./scripts/bench_embed_vs_sqlite.sh
+```
+
+Results and interpretation: `projects-tracker/docs/f4kvs-sqlite-benchmark.md` (portfolio repo).
+
 ## Release alignment
 
 Pin the same `f4kvs-lsm` version/tag as `f4kvs-v2` on every release. See [`../f4kvs-lsm/RELEASING.md`](../f4kvs-lsm/RELEASING.md).
