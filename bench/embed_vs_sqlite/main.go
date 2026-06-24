@@ -1,10 +1,11 @@
 // Product-shaped benchmark: f4kvs-ffi vs SQLite (modernc.org/sqlite).
 //
-// Workloads mirror living-memoirs + ai-rag-agent storage patterns:
-//   - memoir blobs (large JSON-like values)
-//   - RAG chunk batch ingest
-//   - prefix listing
-//   - random point reads
+// Durability-matched column (fair):
+//   - f4kvs_wal_fsync  — engine default (WAL + WalSyncMode::Fsync per put)
+//   - sqlite_wal_full  — journal_mode=WAL, synchronous=FULL, one commit per put
+//
+// Reference column (throughput-oriented, not durability-matched):
+//   - sqlite_wal_normal — WAL + synchronous=NORMAL, batched transactions
 package main
 
 import (
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	f4kvs "github.com/noematic-eu/f4kvs-go"
@@ -24,30 +26,41 @@ import (
 )
 
 type phaseResult struct {
-	Phase   string  `json:"phase"`
-	Store   string  `json:"store"`
-	Ops     int     `json:"ops"`
-	Ms      float64 `json:"ms"`
-	OpsPerS float64 `json:"ops_per_s"`
-	Extra   string  `json:"extra,omitempty"`
+	Phase    string  `json:"phase"`
+	Profile  string  `json:"profile"`
+	Ops      int     `json:"ops"`
+	Ms       float64 `json:"ms"`
+	OpsPerS  float64 `json:"ops_per_s"`
+	Durability string `json:"durability,omitempty"`
+	Extra    string  `json:"extra,omitempty"`
 }
 
 type report struct {
-	Host      string        `json:"host"`
-	Memoirs   int           `json:"memoirs"`
-	Chunks    int           `json:"chunks"`
-	MemoirB   int           `json:"memoir_bytes"`
-	ChunkB    int           `json:"chunk_bytes"`
-	RandomGet int           `json:"random_gets"`
-	Results   []phaseResult `json:"results"`
+	Host        string        `json:"host"`
+	Memoirs     int           `json:"memoirs"`
+	Chunks      int           `json:"chunks"`
+	MemoirB     int           `json:"memoir_bytes"`
+	ChunkB      int           `json:"chunk_bytes"`
+	RandomGet   int           `json:"random_gets"`
+	FairCompare string        `json:"fair_compare"`
+	Results     []phaseResult `json:"results"`
+}
+
+type sqliteProfile struct {
+	Name       string
+	DSN        string
+	Durability string
+	PerCommit  bool
+	Extra      string
 }
 
 func main() {
-	memoirs := flag.Int("memoirs", 100, "memoir blob count")
-	chunks := flag.Int("chunks", 5000, "chunk count")
+	memoirs := flag.Int("memoirs", 50, "memoir blob count")
+	chunks := flag.Int("chunks", 2000, "chunk count")
 	memoirBytes := flag.Int("memoir-bytes", 200_000, "memoir blob size")
 	chunkBytes := flag.Int("chunk-bytes", 4096, "chunk payload size")
-	randomGets := flag.Int("random-gets", 1000, "random point reads after ingest")
+	randomGets := flag.Int("random-gets", 500, "random point reads after ingest")
+	includeRelaxed := flag.Bool("include-relaxed", true, "also run sqlite_wal_normal batched reference column")
 	out := flag.String("out", "", "optional JSON report path")
 	flag.Parse()
 
@@ -70,19 +83,47 @@ func main() {
 	defer os.RemoveAll(tmp)
 
 	rep := report{
-		Host:      fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
-		Memoirs:   *memoirs,
-		Chunks:    *chunks,
-		MemoirB:   *memoirBytes,
-		ChunkB:    *chunkBytes,
-		RandomGet: *randomGets,
+		Host:        fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+		Memoirs:     *memoirs,
+		Chunks:      *chunks,
+		MemoirB:     *memoirBytes,
+		ChunkB:      *chunkBytes,
+		RandomGet:   *randomGets,
+		FairCompare: "f4kvs_wal_fsync vs sqlite_wal_full (per-commit puts)",
 	}
 
-	f4Dir := filepath.Join(tmp, "f4kvs")
-	sqlPath := filepath.Join(tmp, "kv.db")
+	fmt.Fprintf(os.Stderr, "=== fair: f4kvs_wal_fsync vs sqlite_wal_full (per-commit) ===\n")
+	rep.Results = append(rep.Results, benchF4KVS(
+		filepath.Join(tmp, "f4kvs_fsync"),
+		memoirKeys, chunkKeys, payload, chunkPayload, *randomGets,
+	)...)
 
-	rep.Results = append(rep.Results, benchF4KVS(f4Dir, memoirKeys, chunkKeys, payload, chunkPayload, *randomGets)...)
-	rep.Results = append(rep.Results, benchSQLite(sqlPath, memoirKeys, chunkKeys, payload, chunkPayload, *randomGets)...)
+	sqliteProfiles := []sqliteProfile{
+		{
+			Name:       "sqlite_wal_full",
+			DSN:        sqliteDSN("WAL", "FULL"),
+			Durability: "WAL + synchronous=FULL, per-commit put",
+			PerCommit:  true,
+			Extra:      "durability-matched",
+		},
+	}
+	if *includeRelaxed {
+		sqliteProfiles = append(sqliteProfiles, sqliteProfile{
+			Name:       "sqlite_wal_normal",
+			DSN:        sqliteDSN("WAL", "NORMAL"),
+			Durability: "WAL + synchronous=NORMAL, batched tx",
+			PerCommit:  false,
+			Extra:      "reference (relaxed)",
+		})
+	}
+
+	for i, prof := range sqliteProfiles {
+		fmt.Fprintf(os.Stderr, "=== sqlite profile: %s ===\n", prof.Name)
+		path := filepath.Join(tmp, fmt.Sprintf("sqlite_%d.db", i))
+		rep.Results = append(rep.Results, benchSQLite(
+			path, prof, memoirKeys, chunkKeys, payload, chunkPayload, *randomGets,
+		)...)
+	}
 
 	printTable(rep.Results)
 	if *out != "" {
@@ -90,9 +131,17 @@ func main() {
 	}
 }
 
+func sqliteDSN(journal, synchronous string) string {
+	return fmt.Sprintf(
+		"file:kv?_pragma=journal_mode(%s)&_pragma=synchronous(%s)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)",
+		journal, synchronous,
+	)
+}
+
 func benchF4KVS(dir string, memoirKeys, chunkKeys []string, memoirPayload, chunkPayload []byte, randomGets int) []phaseResult {
+	const profile = "f4kvs_wal_fsync"
+	const durability = "WAL + WalSyncMode::Fsync (engine default, per put)"
 	var out []phaseResult
-	fmt.Fprintf(os.Stderr, "[f4kvs] starting...\n")
 
 	engine, err := f4kvs.NewPersistentEngine(dir)
 	if err != nil {
@@ -100,14 +149,14 @@ func benchF4KVS(dir string, memoirKeys, chunkKeys []string, memoirPayload, chunk
 	}
 	defer engine.Close()
 
-	fmt.Fprintf(os.Stderr, "[f4kvs] memoir_batch_put (%d)...\n", len(memoirKeys))
+	fmt.Fprintf(os.Stderr, "[%s] memoir_batch_put (%d, per-commit)...\n", profile, len(memoirKeys))
 	t0 := time.Now()
 	for _, key := range memoirKeys {
 		if err := engine.PutBytes(key, memoirPayload); err != nil {
 			fatal(err)
 		}
 	}
-	out = append(out, result("memoir_batch_put", "f4kvs", len(memoirKeys), time.Since(t0), ""))
+	out = append(out, result("memoir_batch_put", profile, len(memoirKeys), time.Since(t0), durability, "per-commit"))
 
 	t0 = time.Now()
 	for i := 0; i < randomGets; i++ {
@@ -116,21 +165,20 @@ func benchF4KVS(dir string, memoirKeys, chunkKeys []string, memoirPayload, chunk
 			fatal(err)
 		}
 	}
-	out = append(out, result("memoir_random_get", "f4kvs", randomGets, time.Since(t0), ""))
+	out = append(out, result("memoir_random_get", profile, randomGets, time.Since(t0), durability, ""))
 
-	fmt.Fprintf(os.Stderr, "[f4kvs] chunk_batch_put (%d)...\n", len(chunkKeys))
+	fmt.Fprintf(os.Stderr, "[%s] chunk_batch_put (%d, per-commit)...\n", profile, len(chunkKeys))
 	t0 = time.Now()
 	for _, key := range chunkKeys {
 		if err := engine.PutBytes(key, chunkPayload); err != nil {
 			fatal(err)
 		}
 	}
-	out = append(out, result("chunk_batch_put", "f4kvs", len(chunkKeys), time.Since(t0), ""))
+	out = append(out, result("chunk_batch_put", profile, len(chunkKeys), time.Since(t0), durability, "per-commit"))
 
 	t0 = time.Now()
 	keys := engine.ScanPrefixKeys("chunk:legal:")
-	scanMs := time.Since(t0)
-	out = append(out, result("chunk_prefix_scan", "f4kvs", len(keys), scanMs, fmt.Sprintf("keys=%d", len(keys))))
+	out = append(out, result("chunk_prefix_scan", profile, len(keys), time.Since(t0), durability, fmt.Sprintf("keys=%d", len(keys))))
 
 	t0 = time.Now()
 	for i := 0; i < randomGets; i++ {
@@ -139,20 +187,22 @@ func benchF4KVS(dir string, memoirKeys, chunkKeys []string, memoirPayload, chunk
 			fatal(err)
 		}
 	}
-	out = append(out, result("chunk_random_get", "f4kvs", randomGets, time.Since(t0), ""))
+	out = append(out, result("chunk_random_get", profile, randomGets, time.Since(t0), durability, ""))
 
 	return out
 }
 
-func benchSQLite(path string, memoirKeys, chunkKeys []string, memoirPayload, chunkPayload []byte, randomGets int) []phaseResult {
+func benchSQLite(path string, prof sqliteProfile, memoirKeys, chunkKeys []string, memoirPayload, chunkPayload []byte, randomGets int) []phaseResult {
 	var out []phaseResult
-	fmt.Fprintf(os.Stderr, "[sqlite] starting...\n")
 
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
+	// modernc sqlite DSN: replace file placeholder with real path
+	dsn := strings.Replace(prof.DSN, "file:kv?", "file:"+path+"?", 1)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		fatal(err)
 	}
 	defer db.Close()
+	db.SetMaxOpenConns(1)
 
 	if _, err := db.Exec(`CREATE TABLE kv (
 		key TEXT PRIMARY KEY,
@@ -161,25 +211,17 @@ func benchSQLite(path string, memoirKeys, chunkKeys []string, memoirPayload, chu
 		fatal(err)
 	}
 
-	tx, err := db.Begin()
-	if err != nil {
-		fatal(err)
-	}
-	stmt, err := tx.Prepare(`INSERT INTO kv (key, value) VALUES (?, ?)`)
-	if err != nil {
-		fatal(err)
+	putNote := "per-commit"
+	if !prof.PerCommit {
+		putNote = "batched tx"
 	}
 
+	fmt.Fprintf(os.Stderr, "[%s] memoir_batch_put (%d, %s)...\n", prof.Name, len(memoirKeys), putNote)
 	t0 := time.Now()
-	for _, key := range memoirKeys {
-		if _, err := stmt.Exec(key, memoirPayload); err != nil {
-			fatal(err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
+	if err := sqliteBatchPut(db, prof.PerCommit, memoirKeys, memoirPayload); err != nil {
 		fatal(err)
 	}
-	out = append(out, result("memoir_batch_put", "sqlite", len(memoirKeys), time.Since(t0), "WAL batch"))
+	out = append(out, result("memoir_batch_put", prof.Name, len(memoirKeys), time.Since(t0), prof.Durability, prof.Extra+"; "+putNote))
 
 	t0 = time.Now()
 	for i := 0; i < randomGets; i++ {
@@ -189,27 +231,14 @@ func benchSQLite(path string, memoirKeys, chunkKeys []string, memoirPayload, chu
 			fatal(err)
 		}
 	}
-	out = append(out, result("memoir_random_get", "sqlite", randomGets, time.Since(t0), ""))
+	out = append(out, result("memoir_random_get", prof.Name, randomGets, time.Since(t0), prof.Durability, ""))
 
-	tx, err = db.Begin()
-	if err != nil {
-		fatal(err)
-	}
-	stmt, err = tx.Prepare(`INSERT INTO kv (key, value) VALUES (?, ?)`)
-	if err != nil {
-		fatal(err)
-	}
-
+	fmt.Fprintf(os.Stderr, "[%s] chunk_batch_put (%d, %s)...\n", prof.Name, len(chunkKeys), putNote)
 	t0 = time.Now()
-	for _, key := range chunkKeys {
-		if _, err := stmt.Exec(key, chunkPayload); err != nil {
-			fatal(err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
+	if err := sqliteBatchPut(db, prof.PerCommit, chunkKeys, chunkPayload); err != nil {
 		fatal(err)
 	}
-	out = append(out, result("chunk_batch_put", "sqlite", len(chunkKeys), time.Since(t0), "WAL batch"))
+	out = append(out, result("chunk_batch_put", prof.Name, len(chunkKeys), time.Since(t0), prof.Durability, prof.Extra+"; "+putNote))
 
 	t0 = time.Now()
 	rows, err := db.Query(`SELECT key FROM kv WHERE key LIKE ?`, "chunk:legal:%")
@@ -225,7 +254,7 @@ func benchSQLite(path string, memoirKeys, chunkKeys []string, memoirPayload, chu
 		keys = append(keys, k)
 	}
 	rows.Close()
-	out = append(out, result("chunk_prefix_scan", "sqlite", len(keys), time.Since(t0), fmt.Sprintf("keys=%d", len(keys))))
+	out = append(out, result("chunk_prefix_scan", prof.Name, len(keys), time.Since(t0), prof.Durability, fmt.Sprintf("keys=%d", len(keys))))
 
 	t0 = time.Now()
 	for i := 0; i < randomGets; i++ {
@@ -235,25 +264,52 @@ func benchSQLite(path string, memoirKeys, chunkKeys []string, memoirPayload, chu
 			fatal(err)
 		}
 	}
-	out = append(out, result("chunk_random_get", "sqlite", randomGets, time.Since(t0), ""))
+	out = append(out, result("chunk_random_get", prof.Name, randomGets, time.Since(t0), prof.Durability, ""))
 
 	return out
 }
 
-func result(phase, store string, ops int, d time.Duration, extra string) phaseResult {
+func sqliteBatchPut(db *sql.DB, perCommit bool, keys []string, payload []byte) error {
+	if perCommit {
+		for _, key := range keys {
+			if _, err := db.Exec(`INSERT INTO kv (key, value) VALUES (?, ?)`, key, payload); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO kv (key, value) VALUES (?, ?)`)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if _, err := stmt.Exec(key, payload); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func result(phase, profile string, ops int, d time.Duration, durability, extra string) phaseResult {
 	ms := float64(d.Microseconds()) / 1000.0
 	opsPerS := 0.0
 	if ms > 0 {
 		opsPerS = float64(ops) / (ms / 1000.0)
 	}
-	return phaseResult{Phase: phase, Store: store, Ops: ops, Ms: ms, OpsPerS: opsPerS, Extra: extra}
+	return phaseResult{
+		Phase: phase, Profile: profile, Ops: ops, Ms: ms, OpsPerS: opsPerS,
+		Durability: durability, Extra: extra,
+	}
 }
 
 func samplePayload(n int) []byte {
 	if n <= 0 {
 		return nil
 	}
-	// JSON-like blob — O(n), stable size (memoir/chunk envelope).
 	head := []byte(`{"v":1,"title":"bench","body":"`)
 	tail := []byte(`"}`)
 	out := make([]byte, n)
@@ -288,25 +344,31 @@ func printTable(results []phaseResult) {
 
 	fmt.Println()
 	fmt.Println("=== f4kvs-ffi vs SQLite (product-shaped workloads) ===")
-	fmt.Printf("%-22s %-8s %8s %12s %12s %s\n", "phase", "store", "ops", "ms", "ops/s", "notes")
+	fmt.Printf("%-22s %-18s %8s %12s %12s %s\n", "phase", "profile", "ops", "ms", "ops/s", "notes")
 	for _, phase := range phases {
+		sort.Slice(byPhase[phase], func(i, j int) bool {
+			return byPhase[phase][i].Profile < byPhase[phase][j].Profile
+		})
 		for _, r := range byPhase[phase] {
-			fmt.Printf("%-22s %-8s %8d %12.1f %12.0f %s\n", r.Phase, r.Store, r.Ops, r.Ms, r.OpsPerS, r.Extra)
+			note := r.Extra
+			if note == "" {
+				note = r.Durability
+			}
+			fmt.Printf("%-22s %-18s %8d %12.1f %12.0f %s\n", r.Phase, r.Profile, r.Ops, r.Ms, r.OpsPerS, note)
 		}
-		ratio := ratioLine(byPhase[phase])
-		if ratio != "" {
-			fmt.Printf("  → %s\n", ratio)
+		if fair := fairRatioLine(byPhase[phase]); fair != "" {
+			fmt.Printf("  → fair compare: %s\n", fair)
 		}
 	}
 }
 
-func ratioLine(rows []phaseResult) string {
+func fairRatioLine(rows []phaseResult) string {
 	var f4, sql float64
 	for _, r := range rows {
-		if r.Store == "f4kvs" {
+		if r.Profile == "f4kvs_wal_fsync" {
 			f4 = r.Ms
 		}
-		if r.Store == "sqlite" {
+		if r.Profile == "sqlite_wal_full" {
 			sql = r.Ms
 		}
 	}
@@ -314,9 +376,9 @@ func ratioLine(rows []phaseResult) string {
 		return ""
 	}
 	if f4 > sql {
-		return fmt.Sprintf("sqlite %.1f× faster", f4/sql)
+		return fmt.Sprintf("sqlite_wal_full %.1f× faster than f4kvs_wal_fsync", f4/sql)
 	}
-	return fmt.Sprintf("f4kvs %.1f× faster", sql/f4)
+	return fmt.Sprintf("f4kvs_wal_fsync %.1f× faster than sqlite_wal_full", sql/f4)
 }
 
 func writeJSON(path string, rep report) {
@@ -334,4 +396,3 @@ func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 	os.Exit(1)
 }
-

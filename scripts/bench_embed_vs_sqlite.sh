@@ -20,7 +20,8 @@ MEMOIRS="${MEMOIRS:-50}"
 CHUNKS="${CHUNKS:-2000}"
 MEMOIR_BYTES="${MEMOIR_BYTES:-200000}"
 CHUNK_BYTES="${CHUNK_BYTES:-4096}"
-RANDOM_GETS="${RANDOM_GETS:-1000}"
+RANDOM_GETS="${RANDOM_GETS:-500}"
+INCLUDE_RELAXED="${INCLUDE_RELAXED:-true}"
 OUT="${OUT:-}"
 
 ARGS=(
@@ -30,6 +31,9 @@ ARGS=(
   -chunk-bytes="$CHUNK_BYTES"
   -random-gets="$RANDOM_GETS"
 )
+if [[ "$INCLUDE_RELAXED" == "false" ]]; then
+  ARGS+=(-include-relaxed=false)
+fi
 if [[ -n "$OUT" ]]; then
   ARGS+=(-out="$OUT")
 fi
