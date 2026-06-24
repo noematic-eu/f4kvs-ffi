@@ -1,8 +1,9 @@
 // Product-shaped benchmark: f4kvs-ffi vs SQLite (modernc.org/sqlite).
 //
 // Durability-matched column (fair, per-commit):
-//   - f4kvs_wal_fsync  — engine default (WAL + WalSyncMode::Fsync per put)
-//   - sqlite_wal_full  — journal_mode=WAL, synchronous=FULL, one commit per put
+//   - f4kvs_wal_segment — segment WAL + sync_all per put (current default)
+//   - f4kvs_wal_frame    — frame WAL + sync_data per put (SQLite-like)
+//   - sqlite_wal_full    — journal_mode=WAL, synchronous=FULL, one commit per put
 //
 // Batched ingest column (product-shaped, one durable unit per batch):
 //   - chunk_batch_put_batched — f4kvs BatchPutBytes (one WAL fsync) vs sqlite batched tx
@@ -93,16 +94,25 @@ func main() {
 		MemoirB:     *memoirBytes,
 		ChunkB:      *chunkBytes,
 		RandomGet:   *randomGets,
-		FairCompare:    "f4kvs_wal_fsync vs sqlite_wal_full (per-commit puts)",
-		BatchedCompare: "f4kvs_wal_fsync vs sqlite_wal_full (chunk_batch_put_batched)",
+		FairCompare:    "f4kvs_wal_segment vs f4kvs_wal_frame vs sqlite_wal_full (per-commit puts)",
+		BatchedCompare: "f4kvs_wal_segment vs sqlite_wal_full (chunk_batch_put_batched)",
 	}
 
-	fmt.Fprintf(os.Stderr, "=== fair: f4kvs_wal_fsync vs sqlite_wal_full (per-commit) ===\n")
+	fmt.Fprintf(os.Stderr, "=== fair: f4kvs_wal_segment (sync_all per put) ===\n")
 	rep.Results = append(rep.Results, benchF4KVS(
-		filepath.Join(tmp, "f4kvs_fsync"),
-		"f4kvs_wal_fsync",
-		"WAL + WalSyncMode::Fsync (engine default, per put)",
+		filepath.Join(tmp, "f4kvs_segment"),
+		"f4kvs_wal_segment",
+		"Segment WAL + WalSyncMode::Fsync (sync_all per put)",
 		nil,
+		memoirKeys, chunkKeys, payload, chunkPayload, *randomGets,
+	)...)
+
+	fmt.Fprintf(os.Stderr, "=== fair: f4kvs_wal_frame (sync_data per put) ===\n")
+	rep.Results = append(rep.Results, benchF4KVS(
+		filepath.Join(tmp, "f4kvs_frame"),
+		"f4kvs_wal_frame",
+		"Frame WAL + WalSyncMode::Fsync (sync_data per put)",
+		&f4kvs.OpenOptions{WalEngine: 1},
 		memoirKeys, chunkKeys, payload, chunkPayload, *randomGets,
 	)...)
 
@@ -501,12 +511,18 @@ type compareLine struct {
 
 func phaseCompares(rows []phaseResult, phase string) []compareLine {
 	var out []compareLine
-	if line := ratioLine(rows, "f4kvs_wal_fsync", "sqlite_wal_full"); line != "" {
-		label := "fair compare"
+	if line := ratioLine(rows, "f4kvs_wal_segment", "sqlite_wal_full"); line != "" {
+		label := "fair compare (segment)"
 		if phase == "chunk_batch_put_batched" {
 			label = "batched compare"
 		}
 		out = append(out, compareLine{label: label, line: line})
+	}
+	if line := ratioLine(rows, "f4kvs_wal_frame", "sqlite_wal_full"); line != "" {
+		out = append(out, compareLine{label: "fair compare (frame)", line: line})
+	}
+	if line := ratioLine(rows, "f4kvs_wal_segment", "f4kvs_wal_frame"); line != "" {
+		out = append(out, compareLine{label: "segment vs frame", line: line})
 	}
 	if line := ratioLine(rows, "f4kvs_group_commit_10ms", "sqlite_wal_full"); line != "" {
 		out = append(out, compareLine{

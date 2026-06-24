@@ -75,6 +75,7 @@ pub struct F4KvsOpenOptions {
     pub group_commit_max_wait_ms: c_uint,
     pub group_commit_max_batch_size: c_uint,
     pub group_commit_wait_durable: c_uchar,
+    pub wal_engine: c_uchar,
 }
 
 fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>) {
@@ -94,6 +95,9 @@ fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>
     }
     if options.group_commit_wait_durable != 0 {
         config.wal.group_commit_wait_durable = true;
+    }
+    if options.wal_engine != 0 {
+        config.wal.engine = f4kvs_lsm::core::config::WalEngine::Frame;
     }
 }
 

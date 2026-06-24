@@ -32,6 +32,8 @@ type OpenOptions struct {
 	GroupCommitMaxWaitMs    uint32
 	GroupCommitMaxBatchSz   uint32
 	GroupCommitWaitDurable  bool
+	// WalEngine: 0 = segment (default), 1 = frame (sync_data per commit)
+	WalEngine               uint8
 }
 
 // NewMemoryEngine opens an ephemeral engine in a temporary directory.
@@ -62,6 +64,7 @@ func NewPersistentEngineWithOptions(path string, opts *OpenOptions) (*F4KVS, err
 			group_commit_max_wait_ms:    C.uint(opts.GroupCommitMaxWaitMs),
 			group_commit_max_batch_size: C.uint(opts.GroupCommitMaxBatchSz),
 			group_commit_wait_durable:   0,
+			wal_engine:                  C.uchar(opts.WalEngine),
 		}
 		if opts.GroupCommitEnabled {
 			copts.group_commit_enabled = 1
