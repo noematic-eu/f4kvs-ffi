@@ -2,6 +2,7 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
+use f4kvs_lsm::core::config::WalSyncMode;
 use f4kvs_lsm::{LsmConfig, LsmTreeEngine};
 use f4kvs_storage_core::traits::StorageEngine;
 use f4kvs_value::Value;
@@ -108,6 +109,8 @@ fn open_lsm_engine(
     let mut config = LsmConfig::default();
     config.data_dir = data_dir.clone();
     config.wal.dir = data_dir.join("wal");
+    // FFI callers use block_on; async fsync on the tokio runtime can stall workers.
+    config.wal.sync_mode = WalSyncMode::FsyncAsync;
     apply_open_options(&mut config, options);
 
     let engine = runtime()
@@ -466,6 +469,25 @@ pub unsafe extern "C" fn f4kvs_engine_compact(engine: *mut F4KvsEngine) -> F4Kvs
             F4KvsResult::ErrorStorage
         }
     }
+}
+
+/// Toggle bulk-import mode (skips per-key SSTable probes during batch_put).
+///
+/// # Safety
+/// `engine` must be a valid pointer returned by `f4kvs_engine_new` or `f4kvs_engine_open`.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_set_bulk_import(
+    engine: *mut F4KvsEngine,
+    enabled: c_uchar,
+) -> F4KvsResult {
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+    engine_ref
+        .engine
+        .set_bulk_import(enabled != 0);
+    F4KvsResult::Success
 }
 
 /// Flush pending WAL and memtable writes.

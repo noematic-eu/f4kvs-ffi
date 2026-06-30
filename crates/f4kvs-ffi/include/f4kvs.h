@@ -134,6 +134,9 @@ void f4kvs_engine_free(F4KvsEngine *engine);
  */
 F4KvsResult f4kvs_engine_compact(F4KvsEngine *engine);
 
+/** Enable bulk-import mode (vault tree load; faster batch_put key counting). */
+F4KvsResult f4kvs_engine_set_bulk_import(F4KvsEngine *engine, unsigned char enabled);
+
 /** Flush pending WAL/memtable writes (including group-commit queue). */
 F4KvsResult f4kvs_engine_flush(F4KvsEngine *engine);
 

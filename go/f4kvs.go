@@ -299,6 +299,24 @@ func (e *F4KVS) BatchDelete(keys []string) error {
 	return nil
 }
 
+// SetBulkImport enables LSM bulk-import mode (faster vault tree batch_put).
+func (e *F4KVS) SetBulkImport(on bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed || e.handle == nil {
+		return ErrClosed
+	}
+	enabled := C.uchar(0)
+	if on {
+		enabled = 1
+	}
+	res := C.f4kvs_engine_set_bulk_import(e.handle, enabled)
+	if res != C.F4KVS_SUCCESS {
+		return fmt.Errorf("f4kvs set bulk import: %s", lastError())
+	}
+	return nil
+}
+
 func (e *F4KVS) Flush() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
