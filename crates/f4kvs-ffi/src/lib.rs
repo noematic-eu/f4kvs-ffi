@@ -2,7 +2,7 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use f4kvs_lsm::core::config::{WalEngine, WalSyncMode};
+use f4kvs_lsm::core::config::{WalDurability, WalEngine, WalSyncMode};
 use f4kvs_lsm::{LsmConfig, LsmTreeEngine};
 use f4kvs_storage_core::traits::StorageEngine;
 use f4kvs_value::Value;
@@ -77,12 +77,21 @@ pub struct F4KvsOpenOptions {
     pub group_commit_max_batch_size: c_uint,
     pub group_commit_wait_durable: c_uchar,
     pub wal_engine: c_uchar,
+    pub wal_durability: c_uchar,
+    pub group_commit_idle_flush_ms: c_uint,
 }
 
 fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>) {
     let Some(options) = options else {
         return;
     };
+
+    let durability = match options.wal_durability {
+        1 => WalDurability::Amortized,
+        2 => WalDurability::Buffered,
+        _ => WalDurability::Strict,
+    };
+    durability.apply_to(&mut config.wal);
 
     if options.group_commit_enabled != 0 {
         config.wal.group_commit_enabled = true;
@@ -96,6 +105,16 @@ fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>
     }
     if options.group_commit_wait_durable != 0 {
         config.wal.group_commit_wait_durable = true;
+    }
+    if options.group_commit_idle_flush_ms > 0 {
+        config.wal.group_commit_idle_flush =
+            Some(Duration::from_millis(options.group_commit_idle_flush_ms as u64));
+    } else if durability == WalDurability::Amortized && config.wal.group_commit_idle_flush.is_none()
+    {
+        config.wal.group_commit_idle_flush = Some(Duration::from_millis(100));
+    }
+    if durability == WalDurability::Amortized && options.group_commit_max_wait_ms == 0 {
+        config.wal.group_commit_max_wait = Duration::from_millis(50);
     }
     config.wal.engine = match options.wal_engine {
         1 => WalEngine::Frame,

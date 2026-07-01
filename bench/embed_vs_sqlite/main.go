@@ -137,6 +137,19 @@ func main() {
 		memoirKeys, chunkKeys, payload, chunkPayload, *randomGets,
 	)...)
 
+	fmt.Fprintf(os.Stderr, "=== f4kvs amortized: 50ms window + 100ms idle flush (wal_durability=1) ===\n")
+	rep.Results = append(rep.Results, benchF4KVS(
+		filepath.Join(tmp, "f4kvs_gc_idle"),
+		"f4kvs_group_commit_idle",
+		"Amortized WAL — 50ms max wait + 100ms idle flush (wal_durability=1)",
+		&f4kvs.OpenOptions{
+			WalDurability:          f4kvs.WalDurabilityAmortized,
+			GroupCommitMaxWaitMs:   50,
+			GroupCommitIdleFlushMs: 100,
+		},
+		memoirKeys, chunkKeys, payload, chunkPayload, *randomGets,
+	)...)
+
 	sqliteProfiles := []sqliteProfile{
 		{
 			Name:       "sqlite_wal_full",
@@ -168,6 +181,13 @@ func main() {
 	if *out != "" {
 		writeJSON(*out, rep)
 	}
+}
+
+func usesGroupCommit(opts *f4kvs.OpenOptions) bool {
+	if opts == nil {
+		return false
+	}
+	return opts.GroupCommitEnabled || opts.WalDurability == f4kvs.WalDurabilityAmortized
 }
 
 func sqliteDSN(journal, synchronous string) string {
@@ -219,7 +239,7 @@ func benchF4KVS(
 	}
 	out = append(out, result("chunk_batch_put", profile, len(chunkKeys), time.Since(t0), durability, "per-commit"))
 
-	if opts != nil && opts.GroupCommitEnabled {
+	if usesGroupCommit(opts) {
 		fmt.Fprintf(os.Stderr, "[%s] chunk_batch_put_flush (FlushWAL after async puts)...\n", profile)
 		t0 = time.Now()
 		if err := engine.FlushWAL(); err != nil {

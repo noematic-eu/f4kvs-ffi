@@ -25,6 +25,13 @@ const (
 	WalEngineIndexed = 2
 )
 
+// WAL durability presets for OpenOptions.WalDurability.
+const (
+	WalDurabilityStrict    = 0 // fsync per put (default)
+	WalDurabilityAmortized = 1 // group commit + idle flush
+	WalDurabilityBuffered  = 2 // flush only; call FlushWAL() to pin
+)
+
 // F4KVS wraps the f4kvs-ffi LSM engine.
 type F4KVS struct {
 	handle *C.F4KvsEngine
@@ -41,6 +48,10 @@ type OpenOptions struct {
 	GroupCommitWaitDurable  bool
 	// WalEngine: 0 = segment (default), 1 = frame, 2 = indexed (WAL v2)
 	WalEngine uint8
+	// WalDurability: 0 = strict, 1 = amortized, 2 = buffered
+	WalDurability uint8
+	// GroupCommitIdleFlushMs: quiet-period flush (0 = preset default for amortized)
+	GroupCommitIdleFlushMs uint32
 }
 
 // NewMemoryEngine opens an ephemeral engine in a temporary directory.
@@ -67,11 +78,13 @@ func NewPersistentEngineWithOptions(path string, opts *OpenOptions) (*F4KVS, err
 		handle = C.f4kvs_engine_open(cpath)
 	} else {
 		copts := C.F4KvsOpenOptions{
-			group_commit_enabled:        0,
-			group_commit_max_wait_ms:    C.uint(opts.GroupCommitMaxWaitMs),
-			group_commit_max_batch_size: C.uint(opts.GroupCommitMaxBatchSz),
-			group_commit_wait_durable:   0,
-			wal_engine:                  C.uchar(opts.WalEngine),
+			group_commit_enabled:          0,
+			group_commit_max_wait_ms:      C.uint(opts.GroupCommitMaxWaitMs),
+			group_commit_max_batch_size:   C.uint(opts.GroupCommitMaxBatchSz),
+			group_commit_wait_durable:     0,
+			wal_engine:                    C.uchar(opts.WalEngine),
+			wal_durability:                C.uchar(opts.WalDurability),
+			group_commit_idle_flush_ms:    C.uint(opts.GroupCommitIdleFlushMs),
 		}
 		if opts.GroupCommitEnabled {
 			copts.group_commit_enabled = 1

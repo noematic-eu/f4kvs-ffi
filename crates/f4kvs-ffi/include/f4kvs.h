@@ -81,7 +81,19 @@ typedef struct {
     uint8_t group_commit_wait_durable;
     /** WAL backend: 0 = segment, 1 = frame (sync_data), 2 = indexed (WAL v2). */
     uint8_t wal_engine;
+    /**
+     * Durability preset: 0 = strict (fsync per put), 1 = amortized (group commit),
+     * 2 = buffered (flush only; call f4kvs_engine_flush_wal() to pin).
+     */
+    uint8_t wal_durability;
+    /** Idle flush ms: fsync pending WAL after this quiet period (0 = preset default). */
+    uint32_t group_commit_idle_flush_ms;
 } F4KvsOpenOptions;
+
+/** @see F4KvsOpenOptions.wal_durability */
+#define F4KVS_WAL_DURABILITY_STRICT 0
+#define F4KVS_WAL_DURABILITY_AMORTIZED 1
+#define F4KVS_WAL_DURABILITY_BUFFERED 2
 
 /** @brief Key-value pair returned by prefix scans. */
 typedef struct {

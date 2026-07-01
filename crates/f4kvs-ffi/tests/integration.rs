@@ -287,6 +287,45 @@ fn test_batch_put_bytes_workflow() {
 }
 
 #[test]
+fn test_open_amortized_wal_durability() {
+    unsafe {
+        let dir = std::env::temp_dir().join(format!(
+            "f4kvs_amortized_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_c = to_c_string(dir.to_str().unwrap());
+        let options = F4KvsOpenOptions {
+            group_commit_enabled: 0,
+            group_commit_max_wait_ms: 50,
+            group_commit_max_batch_size: 0,
+            group_commit_wait_durable: 0,
+            wal_engine: 0,
+            wal_durability: 1,
+            group_commit_idle_flush_ms: 100,
+        };
+        let engine = f4kvs_engine_open_ex(dir_c.as_ptr(), &options);
+        assert!(!engine.is_null());
+
+        let key = to_c_string("amortized-key");
+        let value = b"amortized-value";
+        let result = f4kvs_engine_put_bytes(
+            engine,
+            key.as_ptr(),
+            value.as_ptr(),
+            value.len(),
+        );
+        assert_eq!(result, F4KvsResult::Success);
+
+        let result = f4kvs_engine_flush_wal(engine);
+        assert_eq!(result, F4KvsResult::Success);
+
+        f4kvs_engine_close(engine);
+        f4kvs_engine_free(engine);
+    }
+}
+
+#[test]
 fn test_open_indexed_wal_engine() {
     unsafe {
         let dir = std::env::temp_dir().join(format!(
@@ -301,6 +340,8 @@ fn test_open_indexed_wal_engine() {
             group_commit_max_batch_size: 0,
             group_commit_wait_durable: 0,
             wal_engine: 2,
+            wal_durability: 0,
+            group_commit_idle_flush_ms: 0,
         };
         let engine = f4kvs_engine_open_ex(dir_c.as_ptr(), &options);
         assert!(!engine.is_null());
