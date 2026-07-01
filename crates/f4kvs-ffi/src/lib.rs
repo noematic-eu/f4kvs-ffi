@@ -24,6 +24,8 @@ const MAX_VALUE_LENGTH: usize = 100 * 1024 * 1024;
 
 static ENGINE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+/// Serialize all FFI entry points: Tokio block_on must not run concurrently.
+static FFI_MUTEX: Mutex<()> = Mutex::new(());
 
 /// FFI-safe result type
 #[repr(C)]
@@ -62,6 +64,14 @@ fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
         Runtime::new().expect("failed to create Tokio runtime for f4kvs-ffi")
     })
+}
+
+fn block_on<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let _guard = FFI_MUTEX.lock().unwrap();
+    runtime().block_on(future)
 }
 
 fn unique_data_dir() -> PathBuf {
@@ -134,9 +144,7 @@ fn open_lsm_engine(
     config.wal.sync_mode = WalSyncMode::FsyncAsync;
     apply_open_options(&mut config, options);
 
-    let engine = runtime()
-        .block_on(LsmTreeEngine::new(config))
-        .map_err(|e| {
+    let engine = block_on(LsmTreeEngine::new(config)).map_err(|e| {
             set_last_error(&format!("Failed to open LSM engine: {}", e));
             F4KvsResult::ErrorStorage
         })?;
@@ -452,7 +460,7 @@ pub unsafe extern "C" fn f4kvs_engine_close(engine: *mut F4KvsEngine) -> F4KvsRe
         Err(e) => return e,
     };
 
-    match runtime().block_on(engine_ref.engine.shutdown()) {
+    match block_on(engine_ref.engine.shutdown()) {
         Ok(_) => F4KvsResult::Success,
         Err(e) => {
             set_last_error(&format!("Close failed: {}", e));
@@ -483,7 +491,7 @@ pub unsafe extern "C" fn f4kvs_engine_compact(engine: *mut F4KvsEngine) -> F4Kvs
         Err(e) => return e,
     };
 
-    match runtime().block_on(engine_ref.engine.compact()) {
+    match block_on(engine_ref.engine.compact()) {
         Ok(_) => F4KvsResult::Success,
         Err(e) => {
             set_last_error(&format!("Compact failed: {}", e));
@@ -522,7 +530,7 @@ pub unsafe extern "C" fn f4kvs_engine_flush(engine: *mut F4KvsEngine) -> F4KvsRe
         Err(e) => return e,
     };
 
-    match runtime().block_on(engine_ref.engine.flush()) {
+    match block_on(engine_ref.engine.flush()) {
         Ok(_) => F4KvsResult::Success,
         Err(e) => {
             set_last_error(&format!("Flush failed: {}", e));
@@ -542,7 +550,7 @@ pub unsafe extern "C" fn f4kvs_engine_flush_wal(engine: *mut F4KvsEngine) -> F4K
         Err(e) => return e,
     };
 
-    match runtime().block_on(engine_ref.engine.flush_wal()) {
+    match block_on(engine_ref.engine.flush_wal()) {
         Ok(_) => F4KvsResult::Success,
         Err(e) => {
             set_last_error(&format!("Flush WAL failed: {}", e));
@@ -583,7 +591,7 @@ pub unsafe extern "C" fn f4kvs_engine_scan_prefix_keys(
         Err(e) => return e,
     };
 
-    match runtime().block_on(engine_ref.engine.scan_prefix(&prefix_str)) {
+    match block_on(engine_ref.engine.scan_prefix(&prefix_str)) {
         Ok(keys) => {
             let count = keys.len();
             if count == 0 {
@@ -668,7 +676,7 @@ pub unsafe extern "C" fn f4kvs_engine_put(
         Err(e) => return e,
     };
 
-    match runtime().block_on(
+    match block_on(
         engine_ref
             .engine
             .put(&key_str, &Value::String(value_str)),
@@ -721,7 +729,7 @@ pub unsafe extern "C" fn f4kvs_engine_put_bytes(
         std::slice::from_raw_parts(value, value_len).to_vec()
     };
 
-    match runtime().block_on(engine_ref.engine.put(&key_str, &Value::Bytes(bytes))) {
+    match block_on(engine_ref.engine.put(&key_str, &Value::Bytes(bytes))) {
         Ok(_) => F4KvsResult::Success,
         Err(e) => {
             set_last_error(&format!("Put bytes failed: {}", e));
@@ -784,7 +792,7 @@ pub unsafe extern "C" fn f4kvs_engine_batch_put_bytes(
         items.push((key_str, Value::Bytes(bytes)));
     }
 
-    match runtime().block_on(engine_ref.engine.batch_put(items)) {
+    match block_on(engine_ref.engine.batch_put(items)) {
         Ok(_) => F4KvsResult::Success,
         Err(e) => {
             set_last_error(&format!("Batch put bytes failed: {}", e));
@@ -818,7 +826,7 @@ pub unsafe extern "C" fn f4kvs_engine_get(
         Err(e) => return e,
     };
 
-    match runtime().block_on(engine_ref.engine.get(&key_str)) {
+    match block_on(engine_ref.engine.get(&key_str)) {
         Ok(Some(value)) => match allocate_c_string(value_to_string(value)) {
             Ok(ptr) => {
                 *value_out = ptr;
@@ -863,7 +871,7 @@ pub unsafe extern "C" fn f4kvs_engine_get_bytes(
         Err(e) => return e,
     };
 
-    match runtime().block_on(engine_ref.engine.get(&key_str)) {
+    match block_on(engine_ref.engine.get(&key_str)) {
         Ok(Some(value)) => {
             let bytes = value_to_bytes(value);
             match allocate_bytes(bytes) {
@@ -906,7 +914,7 @@ pub unsafe extern "C" fn f4kvs_engine_delete(
         Err(e) => return e,
     };
 
-    match runtime().block_on(engine_ref.engine.delete(&key_str)) {
+    match block_on(engine_ref.engine.delete(&key_str)) {
         Ok(_) => F4KvsResult::Success,
         Err(e) => {
             set_last_error(&format!("Delete failed: {}", e));
@@ -945,7 +953,7 @@ pub unsafe extern "C" fn f4kvs_engine_batch_delete(
         key_strings.push(key_str);
     }
 
-    match runtime().block_on(engine_ref.engine.batch_delete(key_strings)) {
+    match block_on(engine_ref.engine.batch_delete(key_strings)) {
         Ok(_) => F4KvsResult::Success,
         Err(e) => {
             set_last_error(&format!("Batch delete failed: {}", e));
@@ -979,7 +987,7 @@ pub unsafe extern "C" fn f4kvs_engine_exists(
         Err(e) => return e,
     };
 
-    match runtime().block_on(engine_ref.engine.exists(&key_str)) {
+    match block_on(engine_ref.engine.exists(&key_str)) {
         Ok(exists) => {
             *exists_out = if exists { 1 } else { 0 };
             F4KvsResult::Success
@@ -1016,7 +1024,7 @@ pub unsafe extern "C" fn f4kvs_engine_scan_prefix(
         Err(e) => return e,
     };
 
-    match runtime().block_on(engine_ref.engine.scan_prefix_with_values(&prefix_str)) {
+    match block_on(engine_ref.engine.scan_prefix_with_values(&prefix_str)) {
         Ok(items) => {
             let count = items.len();
             if count == 0 {
