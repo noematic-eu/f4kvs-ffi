@@ -227,6 +227,7 @@ func benchF4KVS(
 	}
 
 	out = append(out, benchF4KVSChunkBatched(filepath.Join(dir, "chunk_batched"), profile, chunkKeys, chunkPayload)...)
+	out = append(out, benchF4KVSChunkBulkImport(filepath.Join(dir, "chunk_bulk_import"), profile, chunkKeys, chunkPayload)...)
 
 	t0 = time.Now()
 	keys := engine.ScanPrefixKeys("chunk:legal:")
@@ -277,6 +278,20 @@ func benchF4KVSChunkDurable(
 }
 
 func benchF4KVSChunkBatched(dir, profile string, chunkKeys []string, chunkPayload []byte) []phaseResult {
+	return benchF4KVSChunkBatchPut(dir, profile, chunkKeys, chunkPayload, false, "chunk_batch_put_batched", "BatchPutBytes")
+}
+
+func benchF4KVSChunkBulkImport(dir, profile string, chunkKeys []string, chunkPayload []byte) []phaseResult {
+	return benchF4KVSChunkBatchPut(dir, profile, chunkKeys, chunkPayload, true, "chunk_batch_put_bulk_import", "BatchPutBytes + SetBulkImport(true)")
+}
+
+func benchF4KVSChunkBatchPut(
+	dir, profile string,
+	chunkKeys []string,
+	chunkPayload []byte,
+	bulkImport bool,
+	phase, note string,
+) []phaseResult {
 	const durability = "WAL + WalSyncMode::Fsync (one fsync per BatchPutBytes)"
 	var out []phaseResult
 
@@ -286,17 +301,23 @@ func benchF4KVSChunkBatched(dir, profile string, chunkKeys []string, chunkPayloa
 	}
 	defer engine.Close()
 
+	if bulkImport {
+		if err := engine.SetBulkImport(true); err != nil {
+			fatal(err)
+		}
+	}
+
 	items := make(map[string][]byte, len(chunkKeys))
 	for _, key := range chunkKeys {
 		items[key] = chunkPayload
 	}
 
-	fmt.Fprintf(os.Stderr, "[%s] chunk_batch_put_batched (%d, BatchPutBytes)...\n", profile, len(chunkKeys))
+	fmt.Fprintf(os.Stderr, "[%s] %s (%d, %s)...\n", profile, phase, len(chunkKeys), note)
 	t0 := time.Now()
 	if err := engine.BatchPutBytes(items); err != nil {
 		fatal(err)
 	}
-	out = append(out, result("chunk_batch_put_batched", profile, len(chunkKeys), time.Since(t0), durability, "BatchPutBytes"))
+	out = append(out, result(phase, profile, len(chunkKeys), time.Since(t0), durability, note))
 
 	return out
 }
@@ -498,7 +519,7 @@ func printTable(results []phaseResult) {
 			}
 			fmt.Printf("%-22s %-18s %8d %12.1f %12.0f %s\n", r.Phase, r.Profile, r.Ops, r.Ms, r.OpsPerS, note)
 		}
-		for _, cmp := range phaseCompares(byPhase[phase], phase) {
+		for _, cmp := range phaseCompares(byPhase, byPhase[phase], phase) {
 			fmt.Printf("  → %s: %s\n", cmp.label, cmp.line)
 		}
 	}
@@ -509,11 +530,11 @@ type compareLine struct {
 	line  string
 }
 
-func phaseCompares(rows []phaseResult, phase string) []compareLine {
+func phaseCompares(byPhase map[string][]phaseResult, rows []phaseResult, phase string) []compareLine {
 	var out []compareLine
 	if line := ratioLine(rows, "f4kvs_wal_segment", "sqlite_wal_full"); line != "" {
 		label := "fair compare (segment)"
-		if phase == "chunk_batch_put_batched" {
+		if phase == "chunk_batch_put_batched" || phase == "chunk_batch_put_bulk_import" {
 			label = "batched compare"
 		}
 		out = append(out, compareLine{label: label, line: line})
@@ -523,6 +544,18 @@ func phaseCompares(rows []phaseResult, phase string) []compareLine {
 	}
 	if line := ratioLine(rows, "f4kvs_wal_segment", "f4kvs_wal_frame"); line != "" {
 		out = append(out, compareLine{label: "segment vs frame", line: line})
+	}
+	if phase == "chunk_batch_put_bulk_import" {
+		for _, profile := range []string{"f4kvs_wal_segment", "f4kvs_wal_frame", "f4kvs_group_commit_10ms"} {
+			batched := phaseMs(byPhase["chunk_batch_put_batched"], profile)
+			bulk := phaseMs(rows, profile)
+			if batched > 0 && bulk > 0 {
+				out = append(out, compareLine{
+					label: "bulk-import vs batch (" + profile + ")",
+					line:  speedRatioLine("chunk_batch_put_batched", batched, "chunk_batch_put_bulk_import", bulk),
+				})
+			}
+		}
 	}
 	if line := ratioLine(rows, "f4kvs_group_commit_10ms", "sqlite_wal_full"); line != "" {
 		out = append(out, compareLine{
@@ -547,6 +580,25 @@ func phaseCompares(rows []phaseResult, phase string) []compareLine {
 		}
 	}
 	return out
+}
+
+func phaseMs(rows []phaseResult, profile string) float64 {
+	for _, r := range rows {
+		if r.Profile == profile {
+			return r.Ms
+		}
+	}
+	return 0
+}
+
+func speedRatioLine(fasterName string, fasterMs float64, slowerName string, slowerMs float64) string {
+	if fasterMs == 0 || slowerMs == 0 {
+		return ""
+	}
+	if fasterMs > slowerMs {
+		return fmt.Sprintf("%s %.1f× faster than %s", slowerName, fasterMs/slowerMs, fasterName)
+	}
+	return fmt.Sprintf("%s %.1f× faster than %s", fasterName, slowerMs/fasterMs, slowerName)
 }
 
 func ratioLine(rows []phaseResult, f4Profile, sqlProfile string) string {
