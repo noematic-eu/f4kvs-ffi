@@ -112,7 +112,16 @@ func main() {
 		filepath.Join(tmp, "f4kvs_frame"),
 		"f4kvs_wal_frame",
 		"Frame WAL + WalSyncMode::Fsync (sync_data per put)",
-		&f4kvs.OpenOptions{WalEngine: 1},
+		&f4kvs.OpenOptions{WalEngine: f4kvs.WalEngineFrame},
+		memoirKeys, chunkKeys, payload, chunkPayload, *randomGets,
+	)...)
+
+	fmt.Fprintf(os.Stderr, "=== fair: f4kvs_wal_indexed (WAL v2 pre-allocated frames + wal.idx) ===\n")
+	rep.Results = append(rep.Results, benchF4KVS(
+		filepath.Join(tmp, "f4kvs_indexed"),
+		"f4kvs_wal_indexed",
+		"Indexed WAL v2 — per-frame micro-files + wal.idx (wal_engine=2)",
+		&f4kvs.OpenOptions{WalEngine: f4kvs.WalEngineIndexed},
 		memoirKeys, chunkKeys, payload, chunkPayload, *randomGets,
 	)...)
 
@@ -538,6 +547,21 @@ func phaseCompares(byPhase map[string][]phaseResult, rows []phaseResult, phase s
 			label = "batched compare"
 		}
 		out = append(out, compareLine{label: label, line: line})
+	}
+	if line := ratioLine(rows, "f4kvs_wal_indexed", "sqlite_wal_full"); line != "" {
+		label := "fair compare (indexed v2)"
+		if phase == "chunk_batch_put_batched" || phase == "chunk_batch_put_bulk_import" {
+			label = "batched compare (indexed)"
+		}
+		out = append(out, compareLine{label: label, line: line})
+	}
+	if phase == "chunk_batch_put" {
+		if seg, idx := phaseMs(rows, "f4kvs_wal_segment"), phaseMs(rows, "f4kvs_wal_indexed"); seg > 0 && idx > 0 {
+			out = append(out, compareLine{
+				label: "indexed v2 vs segment",
+				line:  speedRatioLine("f4kvs_wal_indexed", idx, "f4kvs_wal_segment", seg),
+			})
+		}
 	}
 	if line := ratioLine(rows, "f4kvs_wal_frame", "sqlite_wal_full"); line != "" {
 		out = append(out, compareLine{label: "fair compare (frame)", line: line})

@@ -79,7 +79,7 @@ typedef struct {
     uint32_t group_commit_max_batch_size;
     /** 1 = block until entry is fsynced in batch; 0 = return after enqueue (default). */
     uint8_t group_commit_wait_durable;
-    /** WAL backend: 0 = segment (sync_all per commit), 1 = frame (sync_data). */
+    /** WAL backend: 0 = segment, 1 = frame (sync_data), 2 = indexed (WAL v2). */
     uint8_t wal_engine;
 } F4KvsOpenOptions;
 

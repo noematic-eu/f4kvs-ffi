@@ -2,7 +2,7 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use f4kvs_lsm::core::config::WalSyncMode;
+use f4kvs_lsm::core::config::{WalEngine, WalSyncMode};
 use f4kvs_lsm::{LsmConfig, LsmTreeEngine};
 use f4kvs_storage_core::traits::StorageEngine;
 use f4kvs_value::Value;
@@ -97,9 +97,11 @@ fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>
     if options.group_commit_wait_durable != 0 {
         config.wal.group_commit_wait_durable = true;
     }
-    if options.wal_engine != 0 {
-        config.wal.engine = f4kvs_lsm::core::config::WalEngine::Frame;
-    }
+    config.wal.engine = match options.wal_engine {
+        1 => WalEngine::Frame,
+        2 => WalEngine::Indexed,
+        _ => WalEngine::Segment,
+    };
 }
 
 fn open_lsm_engine(

@@ -18,6 +18,13 @@ import (
 	"unsafe"
 )
 
+// WAL engine selectors for OpenOptions.WalEngine.
+const (
+	WalEngineSegment = 0
+	WalEngineFrame   = 1
+	WalEngineIndexed = 2
+)
+
 // F4KVS wraps the f4kvs-ffi LSM engine.
 type F4KVS struct {
 	handle *C.F4KvsEngine
@@ -32,8 +39,8 @@ type OpenOptions struct {
 	GroupCommitMaxWaitMs    uint32
 	GroupCommitMaxBatchSz   uint32
 	GroupCommitWaitDurable  bool
-	// WalEngine: 0 = segment (default), 1 = frame (sync_data per commit)
-	WalEngine               uint8
+	// WalEngine: 0 = segment (default), 1 = frame, 2 = indexed (WAL v2)
+	WalEngine uint8
 }
 
 // NewMemoryEngine opens an ephemeral engine in a temporary directory.

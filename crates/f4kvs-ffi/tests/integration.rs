@@ -285,3 +285,45 @@ fn test_batch_put_bytes_workflow() {
         f4kvs_engine_free(engine);
     }
 }
+
+#[test]
+fn test_open_indexed_wal_engine() {
+    unsafe {
+        let dir = std::env::temp_dir().join(format!(
+            "f4kvs_indexed_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_c = to_c_string(dir.to_str().unwrap());
+        let options = F4KvsOpenOptions {
+            group_commit_enabled: 0,
+            group_commit_max_wait_ms: 0,
+            group_commit_max_batch_size: 0,
+            group_commit_wait_durable: 0,
+            wal_engine: 2,
+        };
+        let engine = f4kvs_engine_open_ex(dir_c.as_ptr(), &options);
+        assert!(!engine.is_null());
+
+        let key = to_c_string("indexed-key");
+        let value = b"indexed-value";
+        let result = f4kvs_engine_put_bytes(
+            engine,
+            key.as_ptr(),
+            value.as_ptr(),
+            value.len(),
+        );
+        assert_eq!(result, F4KvsResult::Success);
+
+        let mut value_out: *mut u8 = std::ptr::null_mut();
+        let mut value_len: usize = 0;
+        let result = f4kvs_engine_get_bytes(engine, key.as_ptr(), &mut value_out, &mut value_len);
+        assert_eq!(result, F4KvsResult::Success);
+        let retrieved = std::slice::from_raw_parts(value_out, value_len);
+        assert_eq!(retrieved, value);
+        f4kvs_bytes_free(value_out);
+
+        f4kvs_engine_close(engine);
+        f4kvs_engine_free(engine);
+    }
+}
