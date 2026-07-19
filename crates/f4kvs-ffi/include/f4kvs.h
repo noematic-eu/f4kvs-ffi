@@ -14,8 +14,8 @@
  * Thread safety
  * -------------
  * A single engine handle may be used concurrently from multiple threads for
- * read/write operations. Error messages are stored in a global buffer protected
- * by a mutex; call f4kvs_get_last_error() immediately after a failed call.
+ * read/write operations. Error messages are stored per thread; call
+ * f4kvs_get_last_error() on the same thread immediately after a failed call.
  *
  * Engine lifecycle
  * ----------------
@@ -245,9 +245,10 @@ F4KvsResult f4kvs_engine_scan_prefix(F4KvsEngine *engine, const char *prefix,
 void f4kvs_scan_result_free(F4KvsScanResult *result);
 
 /**
- * Get the last error message set by the library.
+ * Get the last error message set by the library on the calling thread.
  * @return Pointer to a null-terminated string, or NULL if no error was recorded.
- *         The pointer is valid until the next failed call overwrites it.
+ *         The pointer is valid until the next failed call on the same thread
+ *         overwrites it. Error state is thread-local.
  */
 const char *f4kvs_get_last_error(void);
 

@@ -6,6 +6,7 @@ use f4kvs_lsm::core::config::{WalDurability, WalEngine, WalSyncMode};
 use f4kvs_lsm::{LsmConfig, LsmTreeEngine};
 use f4kvs_storage_core::traits::StorageEngine;
 use f4kvs_value::Value;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_uchar};
@@ -200,48 +201,26 @@ fn value_to_string(value: Value) -> String {
     }
 }
 
-static mut GLOBAL_ERROR_MESSAGE: Option<&'static CStr> = None;
-static GLOBAL_ERROR_LOCK: Mutex<()> = Mutex::new(());
-
-fn set_global_error(msg: &str) {
-    unsafe {
-        let _guard = GLOBAL_ERROR_LOCK.lock().unwrap();
-        GLOBAL_ERROR_MESSAGE = None;
-
-        match CString::new(msg) {
-            Ok(cstring) => {
-                let bytes_with_nul = cstring.into_bytes_with_nul();
-                let boxed_bytes = bytes_with_nul.into_boxed_slice();
-                let leaked_bytes: &'static [u8] = Box::leak(boxed_bytes);
-                let cstr_ref = CStr::from_bytes_with_nul_unchecked(leaked_bytes);
-                GLOBAL_ERROR_MESSAGE = Some(cstr_ref);
-            }
-            Err(_) => {
-                let safe_msg = msg.replace('\0', "\\0");
-                if let Ok(cstring) = CString::new(safe_msg) {
-                    let bytes_with_nul = cstring.into_bytes_with_nul();
-                    let boxed_bytes = bytes_with_nul.into_boxed_slice();
-                    let leaked_bytes: &'static [u8] = Box::leak(boxed_bytes);
-                    let cstr_ref = CStr::from_bytes_with_nul_unchecked(leaked_bytes);
-                    GLOBAL_ERROR_MESSAGE = Some(cstr_ref);
-                }
-            }
-        }
-    }
-}
-
-fn get_global_error_ptr() -> *const c_char {
-    unsafe {
-        let _guard = GLOBAL_ERROR_LOCK.lock().unwrap();
-        match GLOBAL_ERROR_MESSAGE {
-            Some(cstr) => cstr.as_ptr(),
-            None => ptr::null(),
-        }
-    }
+thread_local! {
+    /// Per-thread last-error message. Overwritten on each failure; the
+    /// previous allocation is reclaimed at that point (no leak), and the
+    /// pointer returned by `f4kvs_get_last_error` stays valid until the
+    /// next failed call on the same thread.
+    static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 
 fn set_last_error(msg: &str) {
-    set_global_error(msg);
+    let cstring = CString::new(msg).unwrap_or_else(|_| {
+        CString::new(msg.replace('\0', "\\0")).expect("fallback message contains no NUL")
+    });
+    LAST_ERROR.with(|slot| *slot.borrow_mut() = Some(cstring));
+}
+
+fn get_last_error_ptr() -> *const c_char {
+    LAST_ERROR.with(|slot| match &*slot.borrow() {
+        Some(cstring) => cstring.as_ptr(),
+        None => ptr::null(),
+    })
 }
 
 struct StringAllocator {
@@ -1109,7 +1088,7 @@ pub unsafe extern "C" fn f4kvs_scan_result_free(result: *mut F4KvsScanResult) {
 /// Get the last error message.
 #[no_mangle]
 pub extern "C" fn f4kvs_get_last_error() -> *const c_char {
-    get_global_error_ptr()
+    get_last_error_ptr()
 }
 
 /// Convert a result code to a string.
