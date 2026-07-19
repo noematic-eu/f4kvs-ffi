@@ -58,11 +58,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```c
 #include "f4kvs.h"
 
-F4KvsEngine *engine = f4kvs_open(NULL);
-f4kvs_put(engine, "greeting", "hello");
-char *value = f4kvs_get(engine, "greeting");
-f4kvs_free_string(value);
-f4kvs_close(engine);
+F4KvsEngine *engine = f4kvs_engine_open("./data");
+f4kvs_engine_put(engine, "greeting", "hello");
+
+char *value = NULL;
+if (f4kvs_engine_get(engine, "greeting", &value) == F4KVS_SUCCESS) {
+    /* use value... */
+    f4kvs_string_free(value);
+}
+
+f4kvs_engine_close(engine);
+f4kvs_engine_free(engine);
 ```
 
 Build the shared library:
@@ -73,6 +79,8 @@ make test    # cargo test -p f4kvs-ffi
 ```
 
 Header: [`crates/f4kvs-ffi/include/f4kvs.h`](crates/f4kvs-ffi/include/f4kvs.h)
+
+Known limitations and workarounds: [LIMITATIONS.md](LIMITATIONS.md)
 
 ## Benchmark vs SQLite
 
