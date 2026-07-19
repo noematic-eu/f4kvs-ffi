@@ -9,3 +9,6 @@ Cargo.lock
 
 f4kvs_lsm_wal/
 f4kvs_lsm_data/
+
+# DE bench run outputs (manifest.json + results.jsonl)
+bench/embed_vs_sqlite/runs/

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Product-shaped f4kvs-ffi vs SQLite benchmark.
-# See docs/f4kvs-sqlite-benchmark.md in projects-tracker (or bench output JSON).
+# Default: DE run layout under bench/embed_vs_sqlite/runs/{run_id}/
+# Optional: OUT=path.json also writes legacy flat report (and report.legacy.json in run dir).
+# See bench/embed_vs_sqlite/README.md
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,7 +24,13 @@ MEMOIR_BYTES="${MEMOIR_BYTES:-200000}"
 CHUNK_BYTES="${CHUNK_BYTES:-4096}"
 RANDOM_GETS="${RANDOM_GETS:-500}"
 INCLUDE_RELAXED="${INCLUDE_RELAXED:-true}"
+SEED="${SEED:-42}"
+TIER="${TIER:-}"
+# DE runs root: env override, default next to harness (gitignored)
+BENCH_RUNS_ROOT="${BENCH_RUNS_ROOT:-$BENCH_DIR/runs}"
 OUT="${OUT:-}"
+
+mkdir -p "$BENCH_RUNS_ROOT"
 
 ARGS=(
   -memoirs="$MEMOIRS"
@@ -30,7 +38,12 @@ ARGS=(
   -memoir-bytes="$MEMOIR_BYTES"
   -chunk-bytes="$CHUNK_BYTES"
   -random-gets="$RANDOM_GETS"
+  -seed="$SEED"
+  -runs-root="$BENCH_RUNS_ROOT"
 )
+if [[ -n "$TIER" ]]; then
+  ARGS+=(-tier="$TIER")
+fi
 if [[ "$INCLUDE_RELAXED" == "false" ]]; then
   ARGS+=(-include-relaxed=false)
 fi
@@ -38,4 +51,5 @@ if [[ -n "$OUT" ]]; then
   ARGS+=(-out="$OUT")
 fi
 
+echo "BENCH_RUNS_ROOT=$BENCH_RUNS_ROOT" >&2
 go run . "${ARGS[@]}"

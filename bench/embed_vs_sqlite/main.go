@@ -30,25 +30,30 @@ import (
 )
 
 type phaseResult struct {
-	Phase    string  `json:"phase"`
-	Profile  string  `json:"profile"`
-	Ops      int     `json:"ops"`
-	Ms       float64 `json:"ms"`
-	OpsPerS  float64 `json:"ops_per_s"`
-	Durability string `json:"durability,omitempty"`
-	Extra    string  `json:"extra,omitempty"`
+	Phase      string  `json:"phase"`
+	Profile    string  `json:"profile"`
+	Ops        int     `json:"ops"`
+	Ms         float64 `json:"ms"`
+	OpsPerS    float64 `json:"ops_per_s"`
+	Durability string  `json:"durability,omitempty"`
+	Extra      string  `json:"extra,omitempty"`
+	// MetricOnly/Value/Unit: when MetricOnly is set, DE export emits a single long-format
+	// metric row instead of the default duration_ms + ops_per_s pair (used by restart).
+	MetricOnly string  `json:"metric,omitempty"`
+	Value      float64 `json:"value,omitempty"`
+	Unit       string  `json:"unit,omitempty"`
 }
 
 type report struct {
-	Host        string        `json:"host"`
-	Memoirs     int           `json:"memoirs"`
-	Chunks      int           `json:"chunks"`
-	MemoirB     int           `json:"memoir_bytes"`
-	ChunkB      int           `json:"chunk_bytes"`
-	RandomGet   int           `json:"random_gets"`
-	FairCompare     string        `json:"fair_compare"`
-	BatchedCompare  string        `json:"batched_compare"`
-	Results         []phaseResult `json:"results"`
+	Host           string        `json:"host"`
+	Memoirs        int           `json:"memoirs"`
+	Chunks         int           `json:"chunks"`
+	MemoirB        int           `json:"memoir_bytes"`
+	ChunkB         int           `json:"chunk_bytes"`
+	RandomGet      int           `json:"random_gets"`
+	FairCompare    string        `json:"fair_compare"`
+	BatchedCompare string        `json:"batched_compare"`
+	Results        []phaseResult `json:"results"`
 }
 
 type sqliteProfile struct {
@@ -66,11 +71,15 @@ func main() {
 	chunkBytes := flag.Int("chunk-bytes", 4096, "chunk payload size")
 	randomGets := flag.Int("random-gets", 500, "random point reads after ingest")
 	includeRelaxed := flag.Bool("include-relaxed", true, "also run sqlite_wal_normal batched reference column")
-	out := flag.String("out", "", "optional JSON report path")
+	seed := flag.Int("seed", 42, "deterministic seed (keys are memoir:%04d / chunk:…; payloads use seed fill)")
+	runsRoot := flag.String("runs-root", "", "if set, write DE layout under runs-root/{run_id}/ (manifest + results.jsonl)")
+	tierFlag := flag.String("tier", "", "micro|meso|macro (auto from chunks if empty)")
+	out := flag.String("out", "", "optional legacy flat JSON report path (also written as report.legacy.json in run dir)")
+	runIDFlag := flag.String("run-id", "", "optional run_id (default: UTC compact ISO)")
 	flag.Parse()
 
-	payload := samplePayload(*memoirBytes)
-	chunkPayload := samplePayload(*chunkBytes)
+	payload := samplePayloadSeeded(*memoirBytes, int64(*seed))
+	chunkPayload := samplePayloadSeeded(*chunkBytes, int64(*seed)+1)
 
 	memoirKeys := make([]string, *memoirs)
 	for i := range memoirKeys {
@@ -87,13 +96,53 @@ func main() {
 	}
 	defer os.RemoveAll(tmp)
 
+	tier := *tierFlag
+	if tier == "" {
+		tier = DeriveTier(*chunks)
+	}
+
+	cwd, _ := os.Getwd()
+	repoRoot := FindRepoRoot(cwd)
+	runID := *runIDFlag
+	if runID == "" {
+		runID = NewRunID(time.Now())
+	}
+
+	var writer *RunWriter
+	if *runsRoot != "" {
+		man := RunManifest{
+			Tier: tier,
+			Seed: *seed,
+			Git:  CollectGitInfo(repoRoot),
+			Host: CollectHostInfo(),
+			Scale: ScaleInfo{
+				Memoirs:     *memoirs,
+				Chunks:      *chunks,
+				MemoirBytes: *memoirBytes,
+				ChunkBytes:  *chunkBytes,
+				RandomGets:  *randomGets,
+			},
+			Harness: HarnessInfo{
+				Path: harnessPath,
+				Command: FormatHarnessCommand(
+					*memoirs, *chunks, *memoirBytes, *chunkBytes, *randomGets, *seed, *includeRelaxed,
+				),
+			},
+		}
+		writer, err = NewRunWriter(*runsRoot, runID, man)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Fprintf(os.Stderr, "RUN_DIR_PARTIAL=%s\n", writer.PartialDir)
+	}
+
 	rep := report{
-		Host:        fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
-		Memoirs:     *memoirs,
-		Chunks:      *chunks,
-		MemoirB:     *memoirBytes,
-		ChunkB:      *chunkBytes,
-		RandomGet:   *randomGets,
+		Host:           fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH),
+		Memoirs:        *memoirs,
+		Chunks:         *chunks,
+		MemoirB:        *memoirBytes,
+		ChunkB:         *chunkBytes,
+		RandomGet:      *randomGets,
 		FairCompare:    "f4kvs_wal_segment vs f4kvs_wal_frame vs sqlite_wal_full (per-commit puts)",
 		BatchedCompare: "f4kvs_wal_segment vs sqlite_wal_full (chunk_batch_put_batched)",
 	}
@@ -125,15 +174,16 @@ func main() {
 		memoirKeys, chunkKeys, payload, chunkPayload, *randomGets,
 	)...)
 
+	gc10Opts := &f4kvs.OpenOptions{
+		GroupCommitEnabled:   true,
+		GroupCommitMaxWaitMs: 10,
+	}
 	fmt.Fprintf(os.Stderr, "=== f4kvs group commit: 10ms window (per PutBytes, amortized fsync) ===\n")
 	rep.Results = append(rep.Results, benchF4KVS(
 		filepath.Join(tmp, "f4kvs_gc10"),
 		"f4kvs_group_commit_10ms",
 		"WAL Fsync + group_commit 10ms window (async ack, durable within 10ms)",
-		&f4kvs.OpenOptions{
-			GroupCommitEnabled:   true,
-			GroupCommitMaxWaitMs: 10,
-		},
+		gc10Opts,
 		memoirKeys, chunkKeys, payload, chunkPayload, *randomGets,
 	)...)
 
@@ -177,10 +227,54 @@ func main() {
 		)...)
 	}
 
+	// Integrity gate: close/reopen + row count (minimum engines for étape 1).
+	fmt.Fprintf(os.Stderr, "=== post_restart_row_count: f4kvs_group_commit_10ms ===\n")
+	rep.Results = append(rep.Results, benchF4KVSPostRestart(
+		filepath.Join(tmp, "restart_f4kvs_gc10"),
+		"f4kvs_group_commit_10ms",
+		gc10Opts,
+		memoirKeys, chunkKeys, payload, chunkPayload,
+	)...)
+
+	fmt.Fprintf(os.Stderr, "=== post_restart_row_count: sqlite_wal_full ===\n")
+	rep.Results = append(rep.Results, benchSQLitePostRestart(
+		filepath.Join(tmp, "restart_sqlite_full.db"),
+		sqliteProfiles[0],
+		memoirKeys, chunkKeys, payload, chunkPayload,
+	)...)
+
 	printTable(rep.Results)
+
 	if *out != "" {
 		writeJSON(*out, rep)
 	}
+
+	if writer != nil {
+		writer.AppendPhaseResults(rep.Results)
+		engines := UniqueEngines(rep.Results)
+		finalDir, err := writer.Finalize(&rep, engines)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Fprintf(os.Stderr, "RUN_DIR=%s\n", finalDir)
+		fmt.Fprintf(os.Stderr, "OK manifest.json results.jsonl (lines=%d)\n", writer.LineCount())
+		if writer.HasIntegrityFailure() {
+			fmt.Fprintf(os.Stderr, "FATAL: post_restart integrity_ok=0 (see results.jsonl)\n")
+			os.Exit(1)
+		}
+	} else if hasIntegrityFail(rep.Results) {
+		fmt.Fprintf(os.Stderr, "FATAL: post_restart integrity_ok=0\n")
+		os.Exit(1)
+	}
+}
+
+func hasIntegrityFail(results []phaseResult) bool {
+	for _, r := range results {
+		if r.Phase == "post_restart_row_count" && r.MetricOnly == "integrity_ok" && r.Value == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func usesGroupCommit(opts *f4kvs.OpenOptions) bool {
@@ -498,7 +592,26 @@ func result(phase, profile string, ops int, d time.Duration, durability, extra s
 	}
 }
 
+// metricResult emits a single long-format metric (DE export) and shows in the table.
+func metricResult(phase, profile, metric string, value float64, ops int, unit, notes string) phaseResult {
+	return phaseResult{
+		Phase: phase, Profile: profile, Ops: ops,
+		MetricOnly: metric, Value: value, Unit: unit, Extra: notes,
+		// Populate Ms when metric is duration for table readability.
+		Ms: func() float64 {
+			if metric == "duration_ms" {
+				return value
+			}
+			return 0
+		}(),
+	}
+}
+
 func samplePayload(n int) []byte {
+	return samplePayloadSeeded(n, 0)
+}
+
+func samplePayloadSeeded(n int, seed int64) []byte {
 	if n <= 0 {
 		return nil
 	}
@@ -510,17 +623,159 @@ func samplePayload(n int) []byte {
 	if fill < 0 {
 		return out[:n]
 	}
+	// Deterministic fill from seed (keys are already deterministic; this pins payload bytes).
+	// Fall back to crypto entropy only when seed==0 and we want variety (legacy path).
+	var next func() byte
+	if seed != 0 {
+		state := uint64(seed)
+		next = func() byte {
+			// xorshift64*
+			state ^= state << 13
+			state ^= state >> 7
+			state ^= state << 17
+			return byte(state % 26)
+		}
+	} else {
+		next = func() byte {
+			var b [1]byte
+			_, _ = rand.Read(b[:])
+			return b[0] % 26
+		}
+	}
 	for i := 0; i < fill; i++ {
-		out[len(head)+i] = 'a' + byte((i*17+int(randByte()))%26)
+		out[len(head)+i] = 'a' + next()
 	}
 	copy(out[len(head)+fill:], tail)
 	return out
 }
 
-func randByte() byte {
-	var b [1]byte
-	_, _ = rand.Read(b[:])
-	return b[0]
+// benchF4KVSPostRestart ingests memoirs+chunks, closes, reopens, counts keys.
+func benchF4KVSPostRestart(
+	dir, profile string,
+	opts *f4kvs.OpenOptions,
+	memoirKeys, chunkKeys []string,
+	memoirPayload, chunkPayload []byte,
+) []phaseResult {
+	expected := len(memoirKeys) + len(chunkKeys)
+	_ = os.RemoveAll(dir)
+
+	engine, err := f4kvs.NewPersistentEngineWithOptions(dir, opts)
+	if err != nil {
+		fatal(err)
+	}
+
+	items := make(map[string][]byte, expected)
+	for _, k := range memoirKeys {
+		items[k] = memoirPayload
+	}
+	for _, k := range chunkKeys {
+		items[k] = chunkPayload
+	}
+	if err := engine.BatchPutBytes(items); err != nil {
+		engine.Close()
+		fatal(err)
+	}
+	if usesGroupCommit(opts) {
+		if err := engine.FlushWAL(); err != nil {
+			engine.Close()
+			fatal(err)
+		}
+	}
+	engine.Close()
+
+	t0 := time.Now()
+	reopened, err := f4kvs.NewPersistentEngineWithOptions(dir, opts)
+	if err != nil {
+		fatal(err)
+	}
+	memoirs := reopened.ScanPrefixKeys("memoir:")
+	chunks := reopened.ScanPrefixKeys("chunk:")
+	counted := len(memoirs) + len(chunks)
+	elapsed := time.Since(t0)
+	reopened.Close()
+
+	ms := float64(elapsed.Microseconds()) / 1000.0
+	integrity := 0.0
+	if counted == expected {
+		integrity = 1
+	}
+	notes := fmt.Sprintf("expected=%d counted=%d", expected, counted)
+	fmt.Fprintf(os.Stderr, "[%s] post_restart_row_count: counted=%d expected=%d integrity_ok=%.0f (%.1f ms)\n",
+		profile, counted, expected, integrity, ms)
+
+	return []phaseResult{
+		metricResult("post_restart_row_count", profile, "duration_ms", ms, 0, "ms", "reopen+count"),
+		metricResult("post_restart_row_count", profile, "row_count", float64(counted), 0, "count", notes),
+		metricResult("post_restart_row_count", profile, "expected_row_count", float64(expected), 0, "count", notes),
+		metricResult("post_restart_row_count", profile, "integrity_ok", integrity, 0, "bool", "1=pass 0=fail"),
+	}
+}
+
+// benchSQLitePostRestart mirrors f4kvs restart integrity for sqlite.
+func benchSQLitePostRestart(
+	path string,
+	prof sqliteProfile,
+	memoirKeys, chunkKeys []string,
+	memoirPayload, chunkPayload []byte,
+) []phaseResult {
+	expected := len(memoirKeys) + len(chunkKeys)
+	_ = os.Remove(path)
+
+	dsn := strings.Replace(prof.DSN, "file:kv?", "file:"+path+"?", 1)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`CREATE TABLE kv (
+		key TEXT PRIMARY KEY,
+		value BLOB NOT NULL
+	) WITHOUT ROWID`); err != nil {
+		db.Close()
+		fatal(err)
+	}
+	// Batched ingest (integrity, not perf).
+	if err := sqliteBatchPut(db, false, memoirKeys, memoirPayload); err != nil {
+		db.Close()
+		fatal(err)
+	}
+	if err := sqliteBatchPut(db, false, chunkKeys, chunkPayload); err != nil {
+		db.Close()
+		fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		fatal(err)
+	}
+
+	t0 := time.Now()
+	db2, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		fatal(err)
+	}
+	db2.SetMaxOpenConns(1)
+	var counted int
+	if err := db2.QueryRow(`SELECT COUNT(*) FROM kv`).Scan(&counted); err != nil {
+		db2.Close()
+		fatal(err)
+	}
+	elapsed := time.Since(t0)
+	db2.Close()
+
+	ms := float64(elapsed.Microseconds()) / 1000.0
+	integrity := 0.0
+	if counted == expected {
+		integrity = 1
+	}
+	notes := fmt.Sprintf("expected=%d counted=%d", expected, counted)
+	fmt.Fprintf(os.Stderr, "[%s] post_restart_row_count: counted=%d expected=%d integrity_ok=%.0f (%.1f ms)\n",
+		prof.Name, counted, expected, integrity, ms)
+
+	return []phaseResult{
+		metricResult("post_restart_row_count", prof.Name, "duration_ms", ms, 0, "ms", "reopen+count"),
+		metricResult("post_restart_row_count", prof.Name, "row_count", float64(counted), 0, "count", notes),
+		metricResult("post_restart_row_count", prof.Name, "expected_row_count", float64(expected), 0, "count", notes),
+		metricResult("post_restart_row_count", prof.Name, "integrity_ok", integrity, 0, "bool", "1=pass 0=fail"),
+	}
 }
 
 func printTable(results []phaseResult) {
@@ -539,12 +794,20 @@ func printTable(results []phaseResult) {
 	fmt.Printf("%-22s %-18s %8s %12s %12s %s\n", "phase", "profile", "ops", "ms", "ops/s", "notes")
 	for _, phase := range phases {
 		sort.Slice(byPhase[phase], func(i, j int) bool {
-			return byPhase[phase][i].Profile < byPhase[phase][j].Profile
+			if byPhase[phase][i].Profile != byPhase[phase][j].Profile {
+				return byPhase[phase][i].Profile < byPhase[phase][j].Profile
+			}
+			return byPhase[phase][i].MetricOnly < byPhase[phase][j].MetricOnly
 		})
 		for _, r := range byPhase[phase] {
 			note := r.Extra
 			if note == "" {
 				note = r.Durability
+			}
+			if r.MetricOnly != "" {
+				fmt.Printf("%-22s %-18s %8d %12.1f %12s %s=%g %s\n",
+					r.Phase, r.Profile, r.Ops, r.Ms, r.Unit, r.MetricOnly, r.Value, note)
+				continue
 			}
 			fmt.Printf("%-22s %-18s %8d %12.1f %12.0f %s\n", r.Phase, r.Profile, r.Ops, r.Ms, r.OpsPerS, note)
 		}
