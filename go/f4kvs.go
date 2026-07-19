@@ -253,6 +253,18 @@ func (e *F4KVS) BatchPutBytes(items map[string][]byte) error {
 	cKeys := make([]*C.char, len(keys))
 	cValues := make([]*C.uint8_t, len(keys))
 	cLens := make([]C.size_t, len(keys))
+	// Register cleanup before the allocation loop so a mid-loop failure
+	// (e.g. C.malloc returning nil) still frees everything allocated so far.
+	defer func() {
+		for _, ck := range cKeys {
+			C.free(unsafe.Pointer(ck))
+		}
+		for _, cv := range cValues {
+			if cv != nil {
+				C.free(unsafe.Pointer(cv))
+			}
+		}
+	}()
 	for i, key := range keys {
 		cKeys[i] = C.CString(key)
 		value := values[i]
@@ -267,16 +279,6 @@ func (e *F4KVS) BatchPutBytes(items map[string][]byte) error {
 		cValues[i] = (*C.uint8_t)(buf)
 		C.memcpy(buf, unsafe.Pointer(&value[0]), C.size_t(len(value)))
 	}
-	defer func() {
-		for _, ck := range cKeys {
-			C.free(unsafe.Pointer(ck))
-		}
-		for _, cv := range cValues {
-			if cv != nil {
-				C.free(unsafe.Pointer(cv))
-			}
-		}
-	}()
 
 	res := C.f4kvs_engine_batch_put_bytes(
 		e.handle,

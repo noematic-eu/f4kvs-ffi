@@ -27,6 +27,7 @@ func (e *F4KVS) BatchPutBytes(map[string][]byte) error                { return E
 func (e *F4KVS) BatchDelete([]string) error                           { return ErrCGORequired }
 func (e *F4KVS) SetBulkImport(bool) error                             { return ErrCGORequired }
 func (e *F4KVS) Flush() error                                         { return ErrCGORequired }
+func (e *F4KVS) FlushWAL() error                                      { return ErrCGORequired }
 func (e *F4KVS) Sync() error                                          { return ErrCGORequired }
 func (e *F4KVS) Close()                                               {}
 
