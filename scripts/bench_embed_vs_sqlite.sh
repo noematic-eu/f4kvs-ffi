@@ -26,9 +26,19 @@ RANDOM_GETS="${RANDOM_GETS:-500}"
 INCLUDE_RELAXED="${INCLUDE_RELAXED:-true}"
 SEED="${SEED:-42}"
 TIER="${TIER:-}"
+# all | product | comma-separated (see bench/embed_vs_sqlite/README.md)
+PROFILES="${PROFILES:-all}"
 # DE runs root: env override, default next to harness (gitignored)
 BENCH_RUNS_ROOT="${BENCH_RUNS_ROOT:-$BENCH_DIR/runs}"
 OUT="${OUT:-}"
+
+# Convenience: TIER=meso fills product-shaped defaults unless already overridden.
+if [[ "${TIER}" == "meso" ]]; then
+  if [[ "${CHUNKS}" == "2000" ]]; then CHUNKS=100000; fi
+  if [[ "${RANDOM_GETS}" == "500" ]]; then RANDOM_GETS=5000; fi
+  if [[ "${PROFILES}" == "all" ]]; then PROFILES=product; fi
+  if [[ "${INCLUDE_RELAXED}" == "true" ]]; then INCLUDE_RELAXED=false; fi
+fi
 
 mkdir -p "$BENCH_RUNS_ROOT"
 
@@ -40,6 +50,7 @@ ARGS=(
   -random-gets="$RANDOM_GETS"
   -seed="$SEED"
   -runs-root="$BENCH_RUNS_ROOT"
+  -profiles="$PROFILES"
 )
 if [[ -n "$TIER" ]]; then
   ARGS+=(-tier="$TIER")
@@ -51,5 +62,5 @@ if [[ -n "$OUT" ]]; then
   ARGS+=(-out="$OUT")
 fi
 
-echo "BENCH_RUNS_ROOT=$BENCH_RUNS_ROOT" >&2
+echo "BENCH_RUNS_ROOT=$BENCH_RUNS_ROOT PROFILES=$PROFILES CHUNKS=$CHUNKS TIER=${TIER:-auto}" >&2
 go run . "${ARGS[@]}"

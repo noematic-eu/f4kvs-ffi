@@ -442,7 +442,7 @@ func UniqueEngines(results []phaseResult) []string {
 }
 
 // FormatHarnessCommand rebuilds a readable command string for the manifest.
-func FormatHarnessCommand(memoirs, chunks, memoirBytes, chunkBytes, randomGets, seed int, includeRelaxed bool) string {
+func FormatHarnessCommand(memoirs, chunks, memoirBytes, chunkBytes, randomGets, seed int, includeRelaxed bool, profiles string) string {
 	parts := []string{
 		"go run .",
 		"-memoirs=" + strconv.Itoa(memoirs),
@@ -451,6 +451,9 @@ func FormatHarnessCommand(memoirs, chunks, memoirBytes, chunkBytes, randomGets, 
 		"-chunk-bytes=" + strconv.Itoa(chunkBytes),
 		"-random-gets=" + strconv.Itoa(randomGets),
 		"-seed=" + strconv.Itoa(seed),
+	}
+	if profiles != "" && profiles != "all" {
+		parts = append(parts, "-profiles="+profiles)
 	}
 	if !includeRelaxed {
 		parts = append(parts, "-include-relaxed=false")

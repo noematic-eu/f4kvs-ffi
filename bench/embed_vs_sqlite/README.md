@@ -9,7 +9,29 @@ Harness: memoirs + RAG chunks (put / batch / prefix scan / random get) across f4
 CHUNKS=2000 ./scripts/bench_embed_vs_sqlite.sh
 ```
 
-Env knobs: `MEMOIRS`, `CHUNKS`, `MEMOIR_BYTES`, `CHUNK_BYTES`, `RANDOM_GETS`, `SEED`, `INCLUDE_RELAXED`, `BENCH_RUNS_ROOT`, `OUT` (legacy flat JSON).
+## Run (meso — product path, 100k chunks)
+
+```bash
+# Defaults when TIER=meso: CHUNKS=100000, RANDOM_GETS=5000, PROFILES=product, INCLUDE_RELAXED=false
+TIER=meso ./scripts/bench_embed_vs_sqlite.sh
+```
+
+`PROFILES=product` = `f4kvs_wal_segment` + `sqlite_wal_full` (+ post_restart integrity on both).  
+(`f4kvs_group_commit_10ms` remains available via `PROFILES=…` but is **not** the meso default — group-commit + large BatchPut/FlushWAL stalled at ≥10k–100k keys on 2026-07-23.)
+
+**Scale note:** above `max-per-commit-chunks` (default **10 000**), the harness skips per-commit `PutBytes` loops and uses chunked `BatchPutBytes` (slices of **500**, `SetBulkImport`) / batched SQLite tx.
+
+**WAL rotation deadlock (fixed in f4kvs-lsm):** meso **100 000 × 4 KB** used to stall ~13–15 k keys when the 64 MiB segment filled — `batch_write_entries` called `rotate_segment` while still holding the segment write guard (`let _ = reborrow` did not drop the `RwLockWriteGuard`). Fixed by dropping the guard before rotate (same pattern as frame WAL). Unit: `batch_write_rotates_when_segment_full_no_deadlock`. Evidence: `runs/20260724T024413Z` integrity_ok=1 at 100 050 rows (needs lsm with the fix — path dep or tag ≥ post-fix / v0.3.1).
+
+Full durability matrix (slow at 100k — overnight lab; may need `-max-per-commit-chunks=0` carefully):
+
+```bash
+TIER=meso PROFILES=all ./scripts/bench_embed_vs_sqlite.sh
+# or explicit:
+CHUNKS=100000 PROFILES=f4kvs_wal_segment,f4kvs_group_commit_10ms,sqlite_wal_full ./scripts/bench_embed_vs_sqlite.sh
+```
+
+Env knobs: `MEMOIRS`, `CHUNKS`, `MEMOIR_BYTES`, `CHUNK_BYTES`, `RANDOM_GETS`, `SEED`, `INCLUDE_RELAXED`, `PROFILES` (`all`|`product`|comma-list), `TIER`, `BENCH_RUNS_ROOT`, `OUT` (legacy flat JSON).
 
 ## How to read a run
 

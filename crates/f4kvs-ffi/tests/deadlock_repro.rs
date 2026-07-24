@@ -259,3 +259,49 @@ fn test_max_batch_put_large_values_no_hang() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+#[test]
+fn test_meso_chunked_4kb_no_hang() {
+    // Repro bench meso hang: ~27 batches of 500 × 4KiB stall around 13–15k keys.
+    let (dir, engine) = temp_engine_dir();
+    assert!(!engine.is_null());
+
+    let batch_size = 500;
+    let batches = 60; // 30k keys
+    let big = vec![b'x'; 4 * 1024];
+    let timeout = Duration::from_secs(120);
+    let started = Instant::now();
+
+    for b in 0..batches {
+        if started.elapsed() > timeout {
+            panic!("HANG/TIMEOUT at batch {b}/{batches} keys={} after {:?}", b * batch_size, started.elapsed());
+        }
+        let start = b * batch_size;
+        let key_strings: Vec<_> = (0..batch_size)
+            .map(|i| to_c_string(&format!("chunk:legal:doc-{:04}:chunk-{:06}", (start + i) / 10, start + i)))
+            .collect();
+        let key_ptrs: Vec<*const c_char> = key_strings.iter().map(|k| k.as_ptr()).collect();
+        let values: Vec<Vec<u8>> = (0..batch_size).map(|_| big.clone()).collect();
+        let value_ptrs: Vec<*const u8> = values.iter().map(|v| v.as_ptr()).collect();
+        let value_lens: Vec<usize> = values.iter().map(|v| v.len()).collect();
+
+        let result = unsafe {
+            f4kvs_engine_batch_put_bytes(
+                engine,
+                key_ptrs.as_ptr(),
+                value_ptrs.as_ptr(),
+                value_lens.as_ptr(),
+                batch_size,
+            )
+        };
+        assert_eq!(result, F4KvsResult::Success, "batch {b} failed");
+        if b % 5 == 0 {
+            eprintln!("batch {b}/{batches} keys={} ok ({:?})", (b + 1) * batch_size, started.elapsed());
+        }
+    }
+    eprintln!("meso chunked 4kb complete: {:?}", started.elapsed());
+
+    unsafe {
+        f4kvs_engine_free(engine);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

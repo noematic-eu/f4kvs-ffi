@@ -5,7 +5,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.75"
 authors = ["Baptiste Boussemart <contact@f4kvs.dev>"]
@@ -16,10 +16,10 @@ keywords = ["key-value", "storage", "database", "lsm-tree", "ffi"]
 categories = ["database", "storage"]
 
 [workspace.dependencies]
-f4kvs-value = { git = "https://github.com/noematic-eu/f4kvs-lsm", tag = "v0.3.0", version = "0.3.0" }
-f4kvs-storage-core = { git = "https://github.com/noematic-eu/f4kvs-lsm", tag = "v0.3.0", version = "0.3.0" }
-f4kvs-lsm = { git = "https://github.com/noematic-eu/f4kvs-lsm", tag = "v0.3.0", version = "0.3.0" }
-f4kvs-ffi = { path = "crates/f4kvs-ffi", version = "0.2.1" }
+f4kvs-value = { git = "https://github.com/noematic-eu/f4kvs-lsm", tag = "v0.3.1", version = "0.3.1" }
+f4kvs-storage-core = { git = "https://github.com/noematic-eu/f4kvs-lsm", tag = "v0.3.1", version = "0.3.1" }
+f4kvs-lsm = { git = "https://github.com/noematic-eu/f4kvs-lsm", tag = "v0.3.1", version = "0.3.1" }
+f4kvs-ffi = { path = "crates/f4kvs-ffi", version = "0.2.2" }
 
 tokio = { version = "1.48", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }

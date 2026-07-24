@@ -1,0 +1,71 @@
+# flow_id: rag_chunk_ingest_v1
+# Schema: bench-schema-v1 (docs/f4kvs-data-engineering-bench-plan.md in projects-tracker)
+# Harness: f4kvs-ffi/bench/embed_vs_sqlite
+
+flow_id: rag_chunk_ingest_v1
+description: >
+  Product-shaped RAG chunk ingest — batch put durable, random get, prefix scan,
+  restart integrity. Same keyspace + seed across engines.
+model: "chunk:{corpus}:{id} ~4 KB, BatchPut + FlushWAL profiles"
+
+keyspace:
+  prefix: "chunk:legal:"
+  key_format: "chunk:legal:doc-{doc:04d}:chunk-{id:06d}"
+  seed: 42
+
+payload:
+  chunk_bytes: 4096
+  memoir_bytes: 200000
+  memoir_count_micro: 50
+
+scales:
+  micro:
+    chunks: 2000
+    random_gets: 500
+    ci_budget_min: 15
+  meso:
+    chunks: 100000
+    random_gets: 5000
+    ci_budget_min: 120
+  macro:
+    chunks: 1000000
+    random_gets: 50000
+    lab_only: true
+
+engines:
+  product:
+    # segment: reliable at meso; gc10 stalls at large BatchPut/FlushWAL (2026-07-23)
+    - f4kvs_wal_segment
+    - sqlite_wal_full
+  all:
+    - f4kvs_wal_segment
+    - f4kvs_wal_frame
+    - f4kvs_wal_indexed
+    - f4kvs_group_commit_10ms
+    - f4kvs_group_commit_idle
+    - sqlite_wal_full
+    - sqlite_wal_normal
+
+phases:
+  - memoir_batch_put
+  - memoir_random_get
+  - chunk_batch_put
+  - chunk_batch_put_batched
+  - chunk_prefix_scan
+  - chunk_random_get
+  - post_restart_row_count
+
+integrity:
+  metrics:
+    - row_count
+    - expected_row_count
+    - integrity_ok
+  fail_run_if_integrity_ok_zero: true
+
+reproduce:
+  micro: |
+    CHUNKS=2000 PROFILES=product INCLUDE_RELAXED=false ./scripts/bench_embed_vs_sqlite.sh
+  meso: |
+    TIER=meso ./scripts/bench_embed_vs_sqlite.sh
+  meso_full_matrix: |
+    TIER=meso PROFILES=all ./scripts/bench_embed_vs_sqlite.sh
