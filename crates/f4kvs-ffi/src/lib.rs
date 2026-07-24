@@ -90,6 +90,8 @@ pub struct F4KvsOpenOptions {
     pub wal_engine: c_uchar,
     pub wal_durability: c_uchar,
     pub group_commit_idle_flush_ms: c_uint,
+    /// Max items per batch_put (0 = default 10_000). See f4kvs.h.
+    pub max_batch_size: c_uint,
 }
 
 fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>) {
@@ -132,6 +134,9 @@ fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>
         2 => WalEngine::Indexed,
         _ => WalEngine::Segment,
     };
+    if options.max_batch_size > 0 {
+        config.performance.max_batch_size = options.max_batch_size as usize;
+    }
 }
 
 fn open_lsm_engine(

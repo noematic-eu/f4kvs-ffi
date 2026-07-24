@@ -52,6 +52,8 @@ type OpenOptions struct {
 	WalDurability uint8
 	// GroupCommitIdleFlushMs: quiet-period flush (0 = preset default for amortized)
 	GroupCommitIdleFlushMs uint32
+	// MaxBatchSize: max items per BatchPut (0 = engine default 10_000). Raise for fair bulk.
+	MaxBatchSize uint32
 }
 
 // NewMemoryEngine opens an ephemeral engine in a temporary directory.
@@ -78,13 +80,14 @@ func NewPersistentEngineWithOptions(path string, opts *OpenOptions) (*F4KVS, err
 		handle = C.f4kvs_engine_open(cpath)
 	} else {
 		copts := C.F4KvsOpenOptions{
-			group_commit_enabled:          0,
-			group_commit_max_wait_ms:      C.uint(opts.GroupCommitMaxWaitMs),
-			group_commit_max_batch_size:   C.uint(opts.GroupCommitMaxBatchSz),
-			group_commit_wait_durable:     0,
-			wal_engine:                    C.uchar(opts.WalEngine),
-			wal_durability:                C.uchar(opts.WalDurability),
-			group_commit_idle_flush_ms:    C.uint(opts.GroupCommitIdleFlushMs),
+			group_commit_enabled:        0,
+			group_commit_max_wait_ms:    C.uint(opts.GroupCommitMaxWaitMs),
+			group_commit_max_batch_size: C.uint(opts.GroupCommitMaxBatchSz),
+			group_commit_wait_durable:   0,
+			wal_engine:                  C.uchar(opts.WalEngine),
+			wal_durability:              C.uchar(opts.WalDurability),
+			group_commit_idle_flush_ms:  C.uint(opts.GroupCommitIdleFlushMs),
+			max_batch_size:              C.uint(opts.MaxBatchSize),
 		}
 		if opts.GroupCommitEnabled {
 			copts.group_commit_enabled = 1

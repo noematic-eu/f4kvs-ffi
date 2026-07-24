@@ -303,6 +303,7 @@ fn test_open_amortized_wal_durability() {
             wal_engine: 0,
             wal_durability: 1,
             group_commit_idle_flush_ms: 100,
+            max_batch_size: 0,
         };
         let engine = f4kvs_engine_open_ex(dir_c.as_ptr(), &options);
         assert!(!engine.is_null());
@@ -342,6 +343,7 @@ fn test_open_indexed_wal_engine() {
             wal_engine: 2,
             wal_durability: 0,
             group_commit_idle_flush_ms: 0,
+            max_batch_size: 0,
         };
         let engine = f4kvs_engine_open_ex(dir_c.as_ptr(), &options);
         assert!(!engine.is_null());

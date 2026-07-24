@@ -16,8 +16,20 @@ CHUNKS=2000 ./scripts/bench_embed_vs_sqlite.sh
 TIER=meso ./scripts/bench_embed_vs_sqlite.sh
 ```
 
-`PROFILES=product` = `f4kvs_wal_segment` + `sqlite_wal_full` (+ post_restart integrity on both).  
-(`f4kvs_group_commit_10ms` remains available via `PROFILES=…` but is **not** the meso default — group-commit + large BatchPut/FlushWAL stalled at ≥10k–100k keys on 2026-07-23.)
+`PROFILES=product` = `f4kvs_wal_segment` + `sqlite_wal_full` (+ post_restart integrity).  
+
+`PROFILES=durable_compare` = segment + **group_commit_1ms** + SQLite FULL + SQLite NORMAL.
+
+### Durability (honest)
+
+| Profile | When the API returns | Crash mid long ingest |
+|---------|----------------------|------------------------|
+| **f4kvs_wal_segment** + BatchPut(500) | That 500-key batch is fsync’d | Lose at most the incomplete batch (~500 keys) |
+| **f4kvs_group_commit_1ms** + Put stream | Put acks after group fsync (≤1 ms window) | Lose at most one unflushed group window |
+| **sqlite_wal_full** + one big tx | Whole txn durable on `COMMIT` | Lose **all** keys of the open txn if crash before commit |
+| **sqlite_wal_normal** | Weaker (SQLite may delay fsync) | Larger tail-loss window — **not** durability-matched |
+
+SQLite `synchronous=FULL` is **not** “less secure” than f4kvs in the cryptographic sense — it is industry-grade durable commit. The difference is **checkpoint granularity** during a multi-second ingest, not “SQLite is unsafe.”
 
 **Scale note:** above `max-per-commit-chunks` (default **10 000**), the harness skips per-commit `PutBytes` loops and uses chunked `BatchPutBytes` (slices of **500**, `SetBulkImport`) / batched SQLite tx.
 
@@ -31,7 +43,29 @@ TIER=meso PROFILES=all ./scripts/bench_embed_vs_sqlite.sh
 CHUNKS=100000 PROFILES=f4kvs_wal_segment,f4kvs_group_commit_10ms,sqlite_wal_full ./scripts/bench_embed_vs_sqlite.sh
 ```
 
-Env knobs: `MEMOIRS`, `CHUNKS`, `MEMOIR_BYTES`, `CHUNK_BYTES`, `RANDOM_GETS`, `SEED`, `INCLUDE_RELAXED`, `PROFILES` (`all`|`product`|comma-list), `TIER`, `BENCH_RUNS_ROOT`, `OUT` (legacy flat JSON).
+Env knobs: `MEMOIRS`, `CHUNKS`, `MEMOIR_BYTES`, `CHUNK_BYTES`, `RANDOM_GETS`, `SEED`, `INCLUDE_RELAXED`, `PROFILES` (`all`|`product`|`durable_compare`|comma-list), `TIER`, `BATCH_PUT_SIZE`, `FAIR`, `BENCH_RUNS_ROOT`, `OUT` (legacy flat JSON).
+
+## Fair vs SQLite (same durable unit size)
+
+SQLite meso batched path uses **one transaction → one COMMIT (~one fsync)** for all keys.
+
+Default f4kvs meso uses `BATCH_PUT_SIZE=500` → **N/500 BatchPuts** (many durable units) — **not fair**.
+
+```bash
+# Fair: one BatchPut for all keys + engine max_batch_size raised (OpenOptions)
+FAIR=1 TIER=meso PROFILES=product ./scripts/bench_embed_vs_sqlite.sh
+# equivalent:
+BATCH_PUT_SIZE=0 TIER=meso PROFILES=f4kvs_wal_segment,sqlite_wal_full ./scripts/bench_embed_vs_sqlite.sh
+
+# Closer-but-not-one-shot (engine default cap 10k without MaxBatchSize):
+BATCH_PUT_SIZE=10000 TIER=meso PROFILES=product ./scripts/bench_embed_vs_sqlite.sh
+```
+
+| Setting | f4kvs durable units | SQLite durable units |
+|---------|---------------------|----------------------|
+| `BATCH_PUT_SIZE=500` (default) | ~N/500 | 1 |
+| `BATCH_PUT_SIZE=10000` | ~N/10000 | 1 |
+| `FAIR=1` / `BATCH_PUT_SIZE=0` | **1** | **1** |
 
 ## How to read a run
 

@@ -88,6 +88,12 @@ typedef struct {
     uint8_t wal_durability;
     /** Idle flush ms: fsync pending WAL after this quiet period (0 = preset default). */
     uint32_t group_commit_idle_flush_ms;
+    /**
+     * Max items per BatchPut / batch API (0 = default 10_000 DoS guard).
+     * Raise for bulk-import / fair benches (e.g. 100_000) so one BatchPut can
+     * match a single SQLite transaction size. Cap is enforced by the engine.
+     */
+    uint32_t max_batch_size;
 } F4KvsOpenOptions;
 
 /** @see F4KvsOpenOptions.wal_durability */

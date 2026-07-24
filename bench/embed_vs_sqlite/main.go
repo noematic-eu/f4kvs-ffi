@@ -78,24 +78,38 @@ func main() {
 	// Per-commit 100k PutBytes + FlushWAL under group-commit can hang/stall (observed 2026-07-23).
 	// Above this count, chunk ingest uses BatchPut / batched tx only (product-shaped meso path).
 	maxPerCommitChunks := flag.Int("max-per-commit-chunks", 10_000, "skip per-commit chunk puts above this count (0=never skip)")
+	// BatchPut slice size for scale path. 0 = single BatchPut for all keys (fair vs SQLite one COMMIT).
+	// Default 500 = historical meso (many fsyncs). Engine DoS default is 10_000 unless OpenOptions.MaxBatchSize raised.
+	batchPutSize := flag.Int("batch-put-size", 500, "BatchPut chunk size (0=all keys in one BatchPut; fair vs SQLite)")
+	fairFlag := flag.Bool("fair", false, "fair vs SQLite: batch-put-size=0, raise engine max_batch_size, one durable unit")
 	out := flag.String("out", "", "optional legacy flat JSON report path (also written as report.legacy.json in run dir)")
 	runIDFlag := flag.String("run-id", "", "optional run_id (default: UTC compact ISO)")
 	flag.Parse()
+
+	if *fairFlag {
+		*batchPutSize = 0
+		fmt.Fprintf(os.Stderr, "fair mode: one BatchPut for all chunk keys + engine max_batch_size raised (vs SQLite one COMMIT)\n")
+	}
 
 	want, err := parseProfiles(*profilesFlag)
 	if err != nil {
 		fatal(err)
 	}
+
+	// Capture for closures / helpers.
+	globalBatchPutSize = *batchPutSize
 	// Expand "all" so include-relaxed can drop sqlite_wal_normal cleanly.
 	if want["all"] {
 		want = map[string]bool{}
 		for _, p := range knownProfiles {
 			want[p] = true
 		}
+		// Default "all" omits NORMAL unless -include-relaxed (or explicit profile list).
+		if !*includeRelaxed {
+			delete(want, "sqlite_wal_normal")
+		}
 	}
-	if !*includeRelaxed {
-		delete(want, "sqlite_wal_normal")
-	}
+	// Explicit profiles (product / durable_compare / comma list) keep NORMAL if listed.
 
 	payload := samplePayloadSeeded(*memoirBytes, int64(*seed))
 	chunkPayload := samplePayloadSeeded(*chunkBytes, int64(*seed)+1)
@@ -210,9 +224,26 @@ func main() {
 		)...)
 	}
 
+	// wait_durable=false: PutBytes returns after enqueue; FlushWAL at end of stream
+	// pins durability. Sequential wait_durable=true is ~1 fsync/put effective and ~200 ops/s.
+	gc1Opts := &f4kvs.OpenOptions{
+		GroupCommitEnabled:     true,
+		GroupCommitMaxWaitMs:   1,
+		GroupCommitWaitDurable: false,
+	}
 	gc10Opts := &f4kvs.OpenOptions{
 		GroupCommitEnabled:   true,
 		GroupCommitMaxWaitMs: 10,
+	}
+	if run("f4kvs_group_commit_1ms") {
+		fmt.Fprintf(os.Stderr, "=== f4kvs group commit: 1ms window (per PutBytes, amortized fsync) ===\n")
+		rep.Results = append(rep.Results, benchF4KVS(
+			filepath.Join(tmp, "f4kvs_gc1"),
+			"f4kvs_group_commit_1ms",
+			"WAL group_commit 1ms (async ack; durable after FlushWAL / ≤1ms window)",
+			gc1Opts,
+			memoirKeys, chunkKeys, payload, chunkPayload, *randomGets, skipPerCommitChunks,
+		)...)
 	}
 	if run("f4kvs_group_commit_10ms") {
 		fmt.Fprintf(os.Stderr, "=== f4kvs group commit: 10ms window (per PutBytes, amortized fsync) ===\n")
@@ -273,8 +304,7 @@ func main() {
 		)...)
 	}
 
-	// Integrity gate: close/reopen + row count for primary f4kvs product engine.
-	// Prefer segment (reliable at meso); fall back to gc10 if only that ran.
+	// Integrity gate: reopen + row count for each engine that ran.
 	if run("f4kvs_wal_segment") {
 		fmt.Fprintf(os.Stderr, "=== post_restart_row_count: f4kvs_wal_segment ===\n")
 		rep.Results = append(rep.Results, benchF4KVSPostRestart(
@@ -283,7 +313,17 @@ func main() {
 			nil,
 			memoirKeys, chunkKeys, payload, chunkPayload,
 		)...)
-	} else if run("f4kvs_group_commit_10ms") {
+	}
+	if run("f4kvs_group_commit_1ms") {
+		fmt.Fprintf(os.Stderr, "=== post_restart_row_count: f4kvs_group_commit_1ms ===\n")
+		rep.Results = append(rep.Results, benchF4KVSPostRestart(
+			filepath.Join(tmp, "restart_f4kvs_gc1"),
+			"f4kvs_group_commit_1ms",
+			gc1Opts,
+			memoirKeys, chunkKeys, payload, chunkPayload,
+		)...)
+	}
+	if run("f4kvs_group_commit_10ms") {
 		fmt.Fprintf(os.Stderr, "=== post_restart_row_count: f4kvs_group_commit_10ms ===\n")
 		rep.Results = append(rep.Results, benchF4KVSPostRestart(
 			filepath.Join(tmp, "restart_f4kvs_gc10"),
@@ -305,6 +345,21 @@ func main() {
 		rep.Results = append(rep.Results, benchSQLitePostRestart(
 			filepath.Join(tmp, "restart_sqlite_full.db"),
 			full,
+			memoirKeys, chunkKeys, payload, chunkPayload,
+		)...)
+	}
+	if run("sqlite_wal_normal") {
+		normal := sqliteProfile{
+			Name:       "sqlite_wal_normal",
+			DSN:        sqliteDSN("WAL", "NORMAL"),
+			Durability: "WAL + synchronous=NORMAL, batched tx",
+			PerCommit:  false,
+			Extra:      "reference (relaxed)",
+		}
+		fmt.Fprintf(os.Stderr, "=== post_restart_row_count: sqlite_wal_normal ===\n")
+		rep.Results = append(rep.Results, benchSQLitePostRestart(
+			filepath.Join(tmp, "restart_sqlite_normal.db"),
+			normal,
 			memoirKeys, chunkKeys, payload, chunkPayload,
 		)...)
 	}
@@ -352,6 +407,7 @@ var knownProfiles = []string{
 	"f4kvs_wal_segment",
 	"f4kvs_wal_frame",
 	"f4kvs_wal_indexed",
+	"f4kvs_group_commit_1ms",
 	"f4kvs_group_commit_10ms",
 	"f4kvs_group_commit_idle",
 	"sqlite_wal_full",
@@ -359,11 +415,20 @@ var knownProfiles = []string{
 }
 
 // productProfiles is the meso-friendly set: product path + SQLite peer (+ integrity).
-// Prefer segment WAL (sync per BatchPut) over group_commit_10ms for meso scale:
-// group-commit + large BatchPut/FlushWAL was observed to stall (cond wait, 0% CPU) at ≥10k–100k keys.
+// Prefer segment WAL (sync per BatchPut) over group_commit for default product:
+// segment = durable each BatchPut; group_commit_* amortize fsyncs (different durability class).
 var productProfiles = []string{
 	"f4kvs_wal_segment",
 	"sqlite_wal_full",
+}
+
+// durableCompareProfiles: segment vs 1ms group-commit vs SQLite FULL (+ optional NORMAL).
+// Use PROFILES=durable_compare for a fair durability-labelled matrix.
+var durableCompareProfiles = []string{
+	"f4kvs_wal_segment",
+	"f4kvs_group_commit_1ms",
+	"sqlite_wal_full",
+	"sqlite_wal_normal",
 }
 
 // parseProfiles expands "all" | "product" | comma-separated names into a set.
@@ -376,6 +441,12 @@ func parseProfiles(s string) (map[string]bool, error) {
 	out := map[string]bool{}
 	if s == "product" {
 		for _, p := range productProfiles {
+			out[p] = true
+		}
+		return out, nil
+	}
+	if s == "durable_compare" {
+		for _, p := range durableCompareProfiles {
 			out[p] = true
 		}
 		return out, nil
@@ -398,8 +469,14 @@ func parseProfiles(s string) (map[string]bool, error) {
 			}
 			continue
 		}
+		if name == "durable_compare" {
+			for _, p := range durableCompareProfiles {
+				out[p] = true
+			}
+			continue
+		}
 		if !known[name] {
-			return nil, fmt.Errorf("unknown profile %q (want all|product|%s)", name, strings.Join(knownProfiles, ","))
+			return nil, fmt.Errorf("unknown profile %q (want all|product|durable_compare|%s)", name, strings.Join(knownProfiles, ","))
 		}
 		out[name] = true
 	}
@@ -450,6 +527,7 @@ func benchF4KVS(
 ) []phaseResult {
 	var out []phaseResult
 
+	opts = openOptsForProfile(opts, len(chunkKeys))
 	engine, err := f4kvs.NewPersistentEngineWithOptions(dir, opts)
 	if err != nil {
 		fatal(err)
@@ -499,6 +577,31 @@ func benchF4KVS(
 			// Re-measure on fresh engine: puts then WAL flush in one timed block.
 			out = append(out, benchF4KVSChunkDurable(dir, profile, durability, opts, chunkKeys, chunkPayload)...)
 		}
+	} else if usesGroupCommit(opts) {
+		// Scale + group-commit: stream PutBytes so the wait window can coalesce fsyncs.
+		// (BatchPut already does one fsync per 500 keys — does not exercise 1ms delay.)
+		if err := engine.SetBulkImport(true); err != nil {
+			fatal(err)
+		}
+		fmt.Fprintf(os.Stderr, "[%s] chunk_put_group_commit stream (%d puts + FlushWAL)...\n", profile, len(chunkKeys))
+		t0 = time.Now()
+		for _, key := range chunkKeys {
+			if err := engine.PutBytes(key, chunkPayload); err != nil {
+				fatal(err)
+			}
+		}
+		if err := engine.FlushWAL(); err != nil {
+			fatal(err)
+		}
+		if err := engine.SetBulkImport(false); err != nil {
+			fatal(err)
+		}
+		out = append(out, result(
+			"chunk_put_group_commit", profile, len(chunkKeys), time.Since(t0), durability,
+			"PutBytes stream + FlushWAL (group-commit window; scale path)",
+		))
+		// Side: BatchPut (one fsync/500) for comparison with SQLite batched — separate dir.
+		out = append(out, benchF4KVSChunkBatched(filepath.Join(dir, "chunk_batched"), profile, chunkKeys, chunkPayload)...)
 	} else {
 		// Load main engine via chunked BatchPut so prefix scan / random get see product-scale data.
 		// Engine hard-limit is 10_000 items per BatchPutBytes (DoS guard).
@@ -514,23 +617,27 @@ func benchF4KVS(
 		if err := engine.SetBulkImport(false); err != nil {
 			fatal(err)
 		}
-		if usesGroupCommit(opts) {
+		slice := resolveBatchPutSize(len(chunkKeys), globalBatchPutSize)
+		note := fmt.Sprintf("BatchPutBytes slice=%d SetBulkImport (scale; 0=one-shot fair)", globalBatchPutSize)
+		if globalBatchPutSize <= 0 {
+			note = fmt.Sprintf("BatchPutBytes one-shot n=%d + FlushWAL (fair vs SQLite COMMIT)", len(chunkKeys))
 			if err := engine.FlushWAL(); err != nil {
 				fatal(err)
 			}
 		}
+		_ = slice
 		out = append(out, result(
-			"chunk_batch_put_batched", profile, len(chunkKeys), time.Since(t0), durability,
-			"BatchPutBytes chunked≤10k + SetBulkImport (scale path)",
+			"chunk_batch_put_batched", profile, len(chunkKeys), time.Since(t0), durability, note,
 		))
+		// Side bulk-import measurement (extra load) — skip when one-shot fair (already heavy).
+		if globalBatchPutSize > 0 {
+			out = append(out, benchF4KVSChunkBulkImport(filepath.Join(dir, "chunk_bulk_import"), profile, chunkKeys, chunkPayload)...)
+		}
 	}
 
-	// Side-dir batch/bulk only when we did not already time BatchPut on the main engine.
+	// Micro path: always measure side-dir batch + bulk when not already on scale path.
 	if !skipPerCommitChunks {
 		out = append(out, benchF4KVSChunkBatched(filepath.Join(dir, "chunk_batched"), profile, chunkKeys, chunkPayload)...)
-		out = append(out, benchF4KVSChunkBulkImport(filepath.Join(dir, "chunk_bulk_import"), profile, chunkKeys, chunkPayload)...)
-	} else {
-		// Optional bulk_import side measurement at meso (separate dir, one extra 100k load).
 		out = append(out, benchF4KVSChunkBulkImport(filepath.Join(dir, "chunk_bulk_import"), profile, chunkKeys, chunkPayload)...)
 	}
 
@@ -590,13 +697,43 @@ func benchF4KVSChunkBulkImport(dir, profile string, chunkKeys []string, chunkPay
 	return benchF4KVSChunkBatchPut(dir, profile, chunkKeys, chunkPayload, true, "chunk_batch_put_bulk_import", "BatchPutBytes + SetBulkImport(true)")
 }
 
-// maxBatchPutItems: engine DoS max is 10_000; use 500 for meso stability
-// (deadlock_repro style; 10k×4KB batches were observed to stall after first slice).
-const maxBatchPutItems = 500
+// globalBatchPutSize is set from -batch-put-size (0 = one-shot all keys).
+var globalBatchPutSize = 500
+
+// engineMaxBatchDefault matches f4kvs-lsm PerformanceConfig::max_batch_size default.
+const engineMaxBatchDefault = 10_000
+
+// resolveBatchPutSize returns the slice size for BatchPutBytes loops.
+// size 0 → all keys in one call (caller must open with MaxBatchSize ≥ len(keys)).
+func resolveBatchPutSize(nKeys, size int) int {
+	if size <= 0 || size >= nKeys {
+		return nKeys
+	}
+	return size
+}
+
+func openOptsForProfile(base *f4kvs.OpenOptions, nKeys int) *f4kvs.OpenOptions {
+	need := resolveBatchPutSize(nKeys, globalBatchPutSize)
+	if need <= engineMaxBatchDefault && (base == nil || base.MaxBatchSize == 0) {
+		return base
+	}
+	opts := f4kvs.OpenOptions{}
+	if base != nil {
+		opts = *base
+	}
+	if opts.MaxBatchSize == 0 || int(opts.MaxBatchSize) < need {
+		opts.MaxBatchSize = uint32(need)
+	}
+	return &opts
+}
 
 func batchPutBytesChunked(engine *f4kvs.F4KVS, keys []string, payload []byte) error {
-	for i := 0; i < len(keys); i += maxBatchPutItems {
-		end := i + maxBatchPutItems
+	step := resolveBatchPutSize(len(keys), globalBatchPutSize)
+	if step <= 0 {
+		step = len(keys)
+	}
+	for i := 0; i < len(keys); i += step {
+		end := i + step
 		if end > len(keys) {
 			end = len(keys)
 		}
@@ -607,7 +744,7 @@ func batchPutBytesChunked(engine *f4kvs.F4KVS, keys []string, payload []byte) er
 		if err := engine.BatchPutBytes(items); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "  … batch_put %d/%d\n", end, len(keys))
+		fmt.Fprintf(os.Stderr, "  … batch_put %d/%d (slice=%d)\n", end, len(keys), end-i)
 	}
 	return nil
 }
@@ -619,10 +756,11 @@ func benchF4KVSChunkBatchPut(
 	bulkImport bool,
 	phase, note string,
 ) []phaseResult {
-	const durability = "WAL + WalSyncMode::Fsync (one fsync per BatchPutBytes)"
+	const durability = "WAL (one durable unit per BatchPut slice; fair=one slice)"
 	var out []phaseResult
 
-	engine, err := f4kvs.NewPersistentEngine(dir)
+	opts := openOptsForProfile(nil, len(chunkKeys))
+	engine, err := f4kvs.NewPersistentEngineWithOptions(dir, opts)
 	if err != nil {
 		fatal(err)
 	}
@@ -634,12 +772,17 @@ func benchF4KVSChunkBatchPut(
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "[%s] %s (%d, %s)...\n", profile, phase, len(chunkKeys), note)
+	fmt.Fprintf(os.Stderr, "[%s] %s (%d, %s batch-put-size=%d)...\n", profile, phase, len(chunkKeys), note, globalBatchPutSize)
 	t0 := time.Now()
 	if err := batchPutBytesChunked(engine, chunkKeys, chunkPayload); err != nil {
 		fatal(err)
 	}
-	out = append(out, result(phase, profile, len(chunkKeys), time.Since(t0), durability, note+" (chunked≤10k)"))
+	if globalBatchPutSize <= 0 {
+		if err := engine.FlushWAL(); err != nil {
+			fatal(err)
+		}
+	}
+	out = append(out, result(phase, profile, len(chunkKeys), time.Since(t0), durability, note+fmt.Sprintf(" batch-put-size=%d", globalBatchPutSize)))
 
 	return out
 }
@@ -858,6 +1001,7 @@ func benchF4KVSPostRestart(
 	expected := len(memoirKeys) + len(chunkKeys)
 	_ = os.RemoveAll(dir)
 
+	opts = openOptsForProfile(opts, len(chunkKeys)+len(memoirKeys))
 	engine, err := f4kvs.NewPersistentEngineWithOptions(dir, opts)
 	if err != nil {
 		fatal(err)
@@ -874,7 +1018,7 @@ func benchF4KVSPostRestart(
 			fatal(err)
 		}
 	}
-	if len(chunkKeys) > maxBatchPutItems {
+	if len(chunkKeys) > 1000 {
 		if err := engine.SetBulkImport(true); err != nil {
 			engine.Close()
 			fatal(err)
@@ -884,7 +1028,10 @@ func benchF4KVSPostRestart(
 		engine.Close()
 		fatal(err)
 	}
-	if len(chunkKeys) > maxBatchPutItems {
+	if globalBatchPutSize <= 0 {
+		_ = engine.FlushWAL()
+	}
+	if len(chunkKeys) > 1000 {
 		_ = engine.SetBulkImport(false)
 	}
 	if usesGroupCommit(opts) {

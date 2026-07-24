@@ -26,8 +26,12 @@ RANDOM_GETS="${RANDOM_GETS:-500}"
 INCLUDE_RELAXED="${INCLUDE_RELAXED:-true}"
 SEED="${SEED:-42}"
 TIER="${TIER:-}"
-# all | product | comma-separated (see bench/embed_vs_sqlite/README.md)
+# all | product | durable_compare | comma-separated (see bench/embed_vs_sqlite/README.md)
 PROFILES="${PROFILES:-all}"
+# BatchPut slice size: 500 default; 0 = one-shot all keys (fair vs SQLite one COMMIT)
+BATCH_PUT_SIZE="${BATCH_PUT_SIZE:-500}"
+# FAIR=1 → batch-put-size=0 + engine max_batch raised (parity with SQLite single txn)
+FAIR="${FAIR:-0}"
 # DE runs root: env override, default next to harness (gitignored)
 BENCH_RUNS_ROOT="${BENCH_RUNS_ROOT:-$BENCH_DIR/runs}"
 OUT="${OUT:-}"
@@ -51,6 +55,7 @@ ARGS=(
   -seed="$SEED"
   -runs-root="$BENCH_RUNS_ROOT"
   -profiles="$PROFILES"
+  -batch-put-size="$BATCH_PUT_SIZE"
 )
 if [[ -n "$TIER" ]]; then
   ARGS+=(-tier="$TIER")
@@ -58,9 +63,12 @@ fi
 if [[ "$INCLUDE_RELAXED" == "false" ]]; then
   ARGS+=(-include-relaxed=false)
 fi
+if [[ "$FAIR" == "1" || "$FAIR" == "true" ]]; then
+  ARGS+=(-fair)
+fi
 if [[ -n "$OUT" ]]; then
   ARGS+=(-out="$OUT")
 fi
 
-echo "BENCH_RUNS_ROOT=$BENCH_RUNS_ROOT PROFILES=$PROFILES CHUNKS=$CHUNKS TIER=${TIER:-auto}" >&2
+echo "BENCH_RUNS_ROOT=$BENCH_RUNS_ROOT PROFILES=$PROFILES CHUNKS=$CHUNKS TIER=${TIER:-auto} BATCH_PUT_SIZE=$BATCH_PUT_SIZE FAIR=$FAIR" >&2
 go run . "${ARGS[@]}"

@@ -175,6 +175,7 @@ fn test_group_commit_wait_durable_large_batch_no_hang() {
         wal_engine: 0,
         wal_durability: 0,
         group_commit_idle_flush_ms: 0,
+        max_batch_size: 0,
     };
     let engine = unsafe { f4kvs_engine_open_ex(dir.as_ptr(), &options) };
     assert!(!engine.is_null());
