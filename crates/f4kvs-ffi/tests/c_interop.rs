@@ -246,3 +246,42 @@ fn test_very_long_c_strings() {
         f4kvs_engine_free(engine);
     }
 }
+
+#[test]
+fn test_binary_kv_roundtrip_no_hex() {
+    unsafe {
+        let engine = f4kvs_engine_new();
+        assert!(!engine.is_null());
+
+        let key = b"catalogs/1/6/dir\xC3\xA9"; // UTF-8 "é", not hex
+        let val = b"\x00\x01\x02raw";
+        let put = f4kvs_engine_put_kv(
+            engine,
+            key.as_ptr(),
+            key.len(),
+            val.as_ptr(),
+            val.len(),
+        );
+        assert_eq!(put, F4KvsResult::Success);
+
+        let mut out: *mut u8 = std::ptr::null_mut();
+        let mut n: usize = 0;
+        let get = f4kvs_engine_get_kv(engine, key.as_ptr(), key.len(), &mut out, &mut n);
+        assert_eq!(get, F4KvsResult::Success);
+        assert_eq!(n, val.len());
+        let got = std::slice::from_raw_parts(out, n);
+        assert_eq!(got, val);
+        f4kvs_bytes_free(out);
+
+        let missing = f4kvs_engine_get_kv(
+            engine,
+            b"nope".as_ptr(),
+            4,
+            &mut out,
+            &mut n,
+        );
+        assert_eq!(missing, F4KvsResult::ErrorNotFound);
+
+        f4kvs_engine_free(engine);
+    }
+}

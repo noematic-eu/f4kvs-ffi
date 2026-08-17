@@ -54,6 +54,10 @@ type OpenOptions struct {
 	GroupCommitIdleFlushMs uint32
 	// MaxBatchSize: max items per BatchPut (0 = engine default 10_000). Raise for fair bulk.
 	MaxBatchSize uint32
+	// CompactionBackground: 0 = default (on), 1 = on, 2 = off.
+	CompactionBackground uint8
+	// MaxSSTablesPerLevel: L0 file-count trigger (0 = default 10).
+	MaxSSTablesPerLevel uint32
 }
 
 // NewMemoryEngine opens an ephemeral engine in a temporary directory.
@@ -88,6 +92,8 @@ func NewPersistentEngineWithOptions(path string, opts *OpenOptions) (*F4KVS, err
 			wal_durability:              C.uchar(opts.WalDurability),
 			group_commit_idle_flush_ms:  C.uint(opts.GroupCommitIdleFlushMs),
 			max_batch_size:              C.uint(opts.MaxBatchSize),
+			compaction_background:       C.uchar(opts.CompactionBackground),
+			max_sstables_per_level:      C.uint(opts.MaxSSTablesPerLevel),
 		}
 		if opts.GroupCommitEnabled {
 			copts.group_commit_enabled = 1

@@ -408,3 +408,46 @@ fn test_concurrent_error_access_safety() {
         }
     }
 }
+
+#[test]
+fn test_concurrent_gets_same_engine_kv() {
+    unsafe {
+        let engine = f4kvs_engine_new();
+        assert!(!engine.is_null());
+
+        let key = b"shared-key";
+        let val = b"shared-value";
+        let put = f4kvs_engine_put_kv(
+            engine,
+            key.as_ptr(),
+            key.len(),
+            val.as_ptr(),
+            val.len(),
+        );
+        assert_eq!(put, F4KvsResult::Success);
+        assert_eq!(f4kvs_engine_flush(engine), F4KvsResult::Success);
+
+        let engine_addr = engine as usize;
+        let mut handles = vec![];
+        for _ in 0..8 {
+            handles.push(thread::spawn(move || {
+                let engine = engine_addr as *mut F4KvsEngine;
+                for _ in 0..200 {
+                    let mut out: *mut u8 = std::ptr::null_mut();
+                    let mut n: usize = 0;
+                    let result =
+                        f4kvs_engine_get_kv(engine, key.as_ptr(), key.len(), &mut out, &mut n);
+                    assert_eq!(result, F4KvsResult::Success);
+                    assert_eq!(n, val.len());
+                    let got = std::slice::from_raw_parts(out, n);
+                    assert_eq!(got, val);
+                    f4kvs_bytes_free(out);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        f4kvs_engine_free(engine);
+    }
+}

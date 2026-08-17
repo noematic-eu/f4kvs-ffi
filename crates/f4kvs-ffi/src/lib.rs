@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 
 /// Maximum key length in bytes (1MB default)
 const MAX_KEY_LENGTH: usize = 1 * 1024 * 1024;
@@ -25,8 +25,7 @@ const MAX_VALUE_LENGTH: usize = 100 * 1024 * 1024;
 
 static ENGINE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-/// Serialize all FFI entry points: Tokio block_on must not run concurrently.
-static FFI_MUTEX: Mutex<()> = Mutex::new(());
+static RUNTIME_HANDLE: OnceLock<Handle> = OnceLock::new();
 
 /// FFI-safe result type
 #[repr(C)]
@@ -67,12 +66,52 @@ fn runtime() -> &'static Runtime {
     })
 }
 
+fn runtime_handle() -> &'static Handle {
+    RUNTIME_HANDLE.get_or_init(|| runtime().handle().clone())
+}
+
+/// Drive an async engine call from a Go/C thread.
+///
+/// `Runtime::block_on` is exclusive (hence the old process-wide mutex).
+/// `Handle::block_on` from non-worker threads can run concurrently, so
+/// Gets on different shards no longer serialize.
 fn block_on<F, T>(future: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    let _guard = FFI_MUTEX.lock().unwrap();
-    runtime().block_on(future)
+    runtime_handle().block_on(future)
+}
+
+fn key_from_bytes<'a>(bytes: &'a [u8], field: &str) -> Result<&'a str, F4KvsResult> {
+    if bytes.len() > MAX_KEY_LENGTH {
+        set_last_error(&format!(
+            "Invalid argument: {} exceeds maximum length of {} bytes",
+            field, MAX_KEY_LENGTH
+        ));
+        return Err(F4KvsResult::ErrorInvalidArgument);
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            set_last_error(&format!("Invalid UTF-8 in {}: {}", field, e));
+            Err(F4KvsResult::ErrorInvalidArgument)
+        }
+    }
+}
+
+unsafe fn key_from_raw<'a>(
+    ptr: *const u8,
+    len: usize,
+    field: &str,
+) -> Result<&'a str, F4KvsResult> {
+    if len == 0 {
+        return Ok("");
+    }
+    if ptr.is_null() {
+        set_last_error(&format!("Invalid argument: {} is null", field));
+        return Err(F4KvsResult::ErrorInvalidArgument);
+    }
+    key_from_bytes(std::slice::from_raw_parts(ptr, len), field)
 }
 
 fn unique_data_dir() -> PathBuf {
@@ -92,6 +131,10 @@ pub struct F4KvsOpenOptions {
     pub group_commit_idle_flush_ms: c_uint,
     /// Max items per batch_put (0 = default 10_000). See f4kvs.h.
     pub max_batch_size: c_uint,
+    /// 0 = default (on), 1 = on, 2 = off. See f4kvs.h.
+    pub compaction_background: c_uchar,
+    /// L0 file-count trigger (0 = default).
+    pub max_sstables_per_level: c_uint,
 }
 
 fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>) {
@@ -136,6 +179,14 @@ fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>
     };
     if options.max_batch_size > 0 {
         config.performance.max_batch_size = options.max_batch_size as usize;
+    }
+    match options.compaction_background {
+        2 => config.compaction.background_enabled = false,
+        1 => config.compaction.background_enabled = true,
+        _ => {}
+    }
+    if options.max_sstables_per_level > 0 {
+        config.levels.max_sstables_per_level = options.max_sstables_per_level as usize;
     }
 }
 
@@ -1150,5 +1201,339 @@ pub unsafe extern "C" fn f4kvs_bytes_free(ptr: *mut u8) {
     let allocator = get_bytes_allocator();
     if let Some(len) = allocator.unregister(ptr) {
         let _ = Box::from_raw(std::slice::from_raw_parts_mut(ptr, len));
+    }
+}
+
+/// Binary-key get (UTF-8 key, no C string / hex).
+///
+/// # Safety
+/// `key` is `key_len` bytes (NULL allowed when key_len is 0). Outputs must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_get_kv(
+    engine: *mut F4KvsEngine,
+    key: *const u8,
+    key_len: usize,
+    value_out: *mut *mut u8,
+    value_len_out: *mut usize,
+) -> F4KvsResult {
+    if value_out.is_null() || value_len_out.is_null() {
+        set_last_error("Invalid argument: output pointer is null");
+        return F4KvsResult::ErrorInvalidArgument;
+    }
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+    let key_str = match key_from_raw(key, key_len, "key") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let got = match engine_ref.engine.try_get_sync(key_str) {
+        Some(r) => r,
+        None => block_on(engine_ref.engine.get(key_str)),
+    };
+    match got {
+        Ok(Some(value)) => {
+            let bytes = value_to_bytes(value);
+            match allocate_bytes(bytes) {
+                Ok((ptr, allocated_len)) => {
+                    *value_out = ptr;
+                    *value_len_out = allocated_len;
+                    F4KvsResult::Success
+                }
+                Err(e) => e,
+            }
+        }
+        Ok(None) => {
+            *value_out = ptr::null_mut();
+            *value_len_out = 0;
+            F4KvsResult::ErrorNotFound
+        }
+        Err(e) => {
+            set_last_error(&format!("Get kv failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+    }
+}
+
+/// Binary-key put.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_put_kv(
+    engine: *mut F4KvsEngine,
+    key: *const u8,
+    key_len: usize,
+    value: *const u8,
+    value_len: usize,
+) -> F4KvsResult {
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+    let key_str = match key_from_raw(key, key_len, "key") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if value_len > MAX_VALUE_LENGTH {
+        set_last_error(&format!(
+            "Invalid argument: value exceeds maximum length of {} bytes",
+            MAX_VALUE_LENGTH
+        ));
+        return F4KvsResult::ErrorInvalidArgument;
+    }
+    if value_len > 0 && value.is_null() {
+        set_last_error("Invalid argument: value is null");
+        return F4KvsResult::ErrorInvalidArgument;
+    }
+    let bytes = if value_len == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(value, value_len).to_vec()
+    };
+    match block_on(engine_ref.engine.put(&key_str, &Value::Bytes(bytes))) {
+        Ok(_) => F4KvsResult::Success,
+        Err(e) => {
+            set_last_error(&format!("Put kv failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+    }
+}
+
+/// Binary-key delete.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_delete_kv(
+    engine: *mut F4KvsEngine,
+    key: *const u8,
+    key_len: usize,
+) -> F4KvsResult {
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+    let key_str = match key_from_raw(key, key_len, "key") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match block_on(engine_ref.engine.delete(&key_str)) {
+        Ok(_) => F4KvsResult::Success,
+        Err(e) => {
+            set_last_error(&format!("Delete kv failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+    }
+}
+
+/// Binary-key batch put.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_batch_put_kv(
+    engine: *mut F4KvsEngine,
+    keys: *const *const u8,
+    key_lens: *const usize,
+    values: *const *const u8,
+    value_lens: *const usize,
+    count: usize,
+) -> F4KvsResult {
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+    if count > 0 && (keys.is_null() || key_lens.is_null() || values.is_null() || value_lens.is_null())
+    {
+        set_last_error("Invalid argument: batch_put_kv pointer is null");
+        return F4KvsResult::ErrorInvalidArgument;
+    }
+    let mut items = Vec::with_capacity(count);
+    for i in 0..count {
+        let key_len = *key_lens.add(i);
+        let key_str = match key_from_raw(*keys.add(i), key_len, "key") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        let value_len = *value_lens.add(i);
+        if value_len > MAX_VALUE_LENGTH {
+            set_last_error("Invalid argument: value exceeds maximum length");
+            return F4KvsResult::ErrorInvalidArgument;
+        }
+        let value_ptr = *values.add(i);
+        if value_len > 0 && value_ptr.is_null() {
+            set_last_error("Invalid argument: value is null");
+            return F4KvsResult::ErrorInvalidArgument;
+        }
+        let bytes = if value_len == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(value_ptr, value_len).to_vec()
+        };
+        items.push((key_str.to_owned(), Value::Bytes(bytes)));
+    }
+    match block_on(engine_ref.engine.batch_put(items)) {
+        Ok(_) => F4KvsResult::Success,
+        Err(e) => {
+            set_last_error(&format!("Batch put kv failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+    }
+}
+
+/// Binary-key batch delete.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_batch_delete_kv(
+    engine: *mut F4KvsEngine,
+    keys: *const *const u8,
+    key_lens: *const usize,
+    count: usize,
+) -> F4KvsResult {
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+    if count > 0 && (keys.is_null() || key_lens.is_null()) {
+        set_last_error("Invalid argument: batch_delete_kv pointer is null");
+        return F4KvsResult::ErrorInvalidArgument;
+    }
+    let mut key_strings = Vec::with_capacity(count);
+    for i in 0..count {
+        match key_from_raw(*keys.add(i), *key_lens.add(i), "key") {
+            Ok(s) => key_strings.push(s.to_owned()),
+            Err(e) => return e,
+        }
+    }
+    match block_on(engine_ref.engine.batch_delete(key_strings)) {
+        Ok(_) => F4KvsResult::Success,
+        Err(e) => {
+            set_last_error(&format!("Batch delete kv failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+    }
+}
+
+unsafe fn fill_scan_result(
+    items: Vec<(String, Value)>,
+    result_out: *mut F4KvsScanResult,
+) -> F4KvsResult {
+    let count = items.len();
+    if count == 0 {
+        (*result_out).pairs = ptr::null_mut();
+        (*result_out).count = 0;
+        return F4KvsResult::Success;
+    }
+    let mut pairs: Vec<F4KvsKVPair> = Vec::with_capacity(count);
+    for (key, value) in items {
+        let key_ptr = match allocate_c_string(key) {
+            Ok(ptr) => ptr,
+            Err(e) => {
+                for pair in &pairs {
+                    f4kvs_string_free(pair.key);
+                    f4kvs_bytes_free(pair.value);
+                }
+                return e;
+            }
+        };
+        let bytes = value_to_bytes(value);
+        let value_len = bytes.len();
+        let (value_ptr, _) = match allocate_bytes(bytes) {
+            Ok(allocation) => allocation,
+            Err(e) => {
+                f4kvs_string_free(key_ptr);
+                for pair in &pairs {
+                    f4kvs_string_free(pair.key);
+                    f4kvs_bytes_free(pair.value);
+                }
+                return e;
+            }
+        };
+        pairs.push(F4KvsKVPair {
+            key: key_ptr,
+            value: value_ptr,
+            value_len,
+        });
+    }
+    let mut boxed = pairs.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    (*result_out).pairs = ptr;
+    (*result_out).count = count;
+    F4KvsResult::Success
+}
+
+/// Binary-prefix scan (values). Result keys are UTF-8 C strings (no hex).
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_scan_prefix_kv(
+    engine: *mut F4KvsEngine,
+    prefix: *const u8,
+    prefix_len: usize,
+    result_out: *mut F4KvsScanResult,
+) -> F4KvsResult {
+    if result_out.is_null() {
+        set_last_error("Invalid argument: result_out is null");
+        return F4KvsResult::ErrorInvalidArgument;
+    }
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+    let prefix_str = match key_from_raw(prefix, prefix_len, "prefix") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match block_on(engine_ref.engine.scan_prefix_with_values(&prefix_str)) {
+        Ok(items) => fill_scan_result(items, result_out),
+        Err(e) => {
+            set_last_error(&format!("Scan prefix kv failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+    }
+}
+
+/// Binary-prefix key-only scan.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_scan_prefix_keys_kv(
+    engine: *mut F4KvsEngine,
+    prefix: *const u8,
+    prefix_len: usize,
+    result_out: *mut F4KvsKeyScanResult,
+) -> F4KvsResult {
+    if result_out.is_null() {
+        set_last_error("Invalid argument: result_out is null");
+        return F4KvsResult::ErrorInvalidArgument;
+    }
+    let engine_ref = match validate_engine(engine) {
+        Ok(engine) => engine,
+        Err(e) => return e,
+    };
+    let prefix_str = match key_from_raw(prefix, prefix_len, "prefix") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match block_on(engine_ref.engine.scan_prefix(&prefix_str)) {
+        Ok(keys) => {
+            let count = keys.len();
+            if count == 0 {
+                (*result_out).keys = ptr::null_mut();
+                (*result_out).count = 0;
+                return F4KvsResult::Success;
+            }
+            let mut key_ptrs: Vec<*mut c_char> = Vec::with_capacity(count);
+            for key in keys {
+                match allocate_c_string(key) {
+                    Ok(ptr) => key_ptrs.push(ptr),
+                    Err(e) => {
+                        for p in key_ptrs {
+                            f4kvs_string_free(p);
+                        }
+                        return e;
+                    }
+                }
+            }
+            let mut boxed = key_ptrs.into_boxed_slice();
+            let ptr = boxed.as_mut_ptr();
+            std::mem::forget(boxed);
+            (*result_out).keys = ptr;
+            (*result_out).count = count;
+            F4KvsResult::Success
+        }
+        Err(e) => {
+            set_last_error(&format!("Scan prefix keys kv failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
     }
 }

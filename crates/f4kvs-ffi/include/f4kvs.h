@@ -94,12 +94,27 @@ typedef struct {
      * match a single SQLite transaction size. Cap is enforced by the engine.
      */
     uint32_t max_batch_size;
+    /**
+     * Background compaction: 0 = default (on), 1 = on, 2 = off.
+     * Turn off for bulk ingest so L0 is not merged while writers are active.
+     */
+    uint8_t compaction_background;
+    /**
+     * L0 file-count trigger (0 = default 10). Raise during bulk ingest so
+     * compact_if_needed is a no-op until the destination is reopened normally.
+     */
+    uint32_t max_sstables_per_level;
 } F4KvsOpenOptions;
 
 /** @see F4KvsOpenOptions.wal_durability */
 #define F4KVS_WAL_DURABILITY_STRICT 0
 #define F4KVS_WAL_DURABILITY_AMORTIZED 1
 #define F4KVS_WAL_DURABILITY_BUFFERED 2
+
+/** @see F4KvsOpenOptions.compaction_background */
+#define F4KVS_COMPACTION_BACKGROUND_DEFAULT 0
+#define F4KVS_COMPACTION_BACKGROUND_ON 1
+#define F4KVS_COMPACTION_BACKGROUND_OFF 2
 
 /** @brief Key-value pair returned by prefix scans. */
 typedef struct {
@@ -263,6 +278,26 @@ const char *f4kvs_result_to_string(F4KvsResult result);
 
 /** Free a string allocated by this library. Safe to call with NULL. */
 void f4kvs_string_free(char *ptr);
+
+/**
+ * Binary-key API (length-prefixed). Keys must be valid UTF-8.
+ * Prefer these over the C-string key functions: no hex, no CString, no NUL trap.
+ * Existing hex-encoded stores are not compatible — recopy from source.
+ */
+F4KvsResult f4kvs_engine_get_kv(F4KvsEngine *engine, const uint8_t *key, size_t key_len,
+                                uint8_t **value_out, size_t *value_len_out);
+F4KvsResult f4kvs_engine_put_kv(F4KvsEngine *engine, const uint8_t *key, size_t key_len,
+                                const uint8_t *value, size_t value_len);
+F4KvsResult f4kvs_engine_delete_kv(F4KvsEngine *engine, const uint8_t *key, size_t key_len);
+F4KvsResult f4kvs_engine_batch_put_kv(F4KvsEngine *engine, const uint8_t **keys,
+                                      const size_t *key_lens, const uint8_t **values,
+                                      const size_t *value_lens, size_t count);
+F4KvsResult f4kvs_engine_batch_delete_kv(F4KvsEngine *engine, const uint8_t **keys,
+                                         const size_t *key_lens, size_t count);
+F4KvsResult f4kvs_engine_scan_prefix_kv(F4KvsEngine *engine, const uint8_t *prefix,
+                                        size_t prefix_len, F4KvsScanResult *result_out);
+F4KvsResult f4kvs_engine_scan_prefix_keys_kv(F4KvsEngine *engine, const uint8_t *prefix,
+                                             size_t prefix_len, F4KvsKeyScanResult *result_out);
 
 #ifdef __cplusplus
 }

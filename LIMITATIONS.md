@@ -26,11 +26,10 @@ whenever a limitation is fixed or a new one is found.
   SQLite by 4–175×.
   *Workaround: use `BatchPutBytes`, or enable group commit / amortized WAL
   when the durability window is acceptable.*
-- **All FFI calls are serialized by a global mutex** (`FFI_MUTEX` in
-  `src/lib.rs`). Concurrent callers — even on independent engine handles —
-  execute one at a time. Concurrent use is safe but yields no throughput
-  scaling. This may be a workaround for an upstream LSM issue; it needs to be
-  either justified with a reference or removed.
+- **FFI Gets are concurrent** (`Handle::block_on` from CGO threads). The old
+  process-wide `FFI_MUTEX` is gone. Compaction merge no longer holds the
+  exclusive operation lock; flush+WAL-truncate still does. Small shards keep
+  SST file descriptors open so Get does not reopen.
 
 ## API and FFI
 
@@ -39,8 +38,11 @@ whenever a limitation is fixed or a new one is found.
   `F4KvsOpenOptions` and is not documented in `f4kvs.h`; exceeding it returns
   a generic storage error.
   *Workaround: split larger ingests into batches of ≤ 10,000 items.*
-- **Keys must be valid UTF-8 C strings** (no embedded NUL bytes, ≤ 1 MB).
-  Binary keys are not supported. Values up to 100 MB.
+- **Keys must be valid UTF-8** (≤ 1 MB). Prefer the length-prefixed `*_kv`
+  APIs (`f4kvs_engine_get_kv`, …): no hex, no CString, no embedded-NUL trap.
+  The legacy C-string APIs still reject NUL. Values up to 100 MB.
+  Hex-encoded catalogs written by older Go bindings are not readable — recopy
+  from Badger/Pebble after upgrading.
 - **String/binary value APIs must not be mixed on the same keyspace.**
   `f4kvs_engine_get` (string) applied to a value written via `put_bytes`
   runs lossy UTF-8 conversion and silently corrupts binary data. Values
