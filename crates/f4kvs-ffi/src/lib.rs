@@ -1537,3 +1537,100 @@ pub unsafe extern "C" fn f4kvs_engine_scan_prefix_keys_kv(
         }
     }
 }
+
+/// Incremental prefix scan. Does not materialize the whole prefix.
+pub struct F4KvsCursor {
+    engine: Arc<LsmTreeEngine>,
+    prefix: String,
+    after: Option<String>,
+    done: bool,
+}
+
+/// Open a prefix cursor. Free with `f4kvs_engine_cursor_free`.
+///
+/// # Safety
+/// `engine` must be a live handle. `prefix` is `prefix_len` UTF-8 bytes.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_cursor_open(
+    engine: *mut F4KvsEngine,
+    prefix: *const u8,
+    prefix_len: usize,
+) -> *mut F4KvsCursor {
+    let engine_ref = match validate_engine(engine) {
+        Ok(e) => e,
+        Err(_) => return ptr::null_mut(),
+    };
+    let prefix = match key_from_raw(prefix, prefix_len, "prefix") {
+        Ok(s) => s.to_owned(),
+        Err(_) => return ptr::null_mut(),
+    };
+    Box::into_raw(Box::new(F4KvsCursor {
+        engine: Arc::clone(&engine_ref.engine),
+        prefix,
+        after: None,
+        done: false,
+    }))
+}
+
+/// Fill up to `max` live prefix pairs after the last emitted key.
+///
+/// # Safety
+/// `cur` from `cursor_open`. `result_out` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_cursor_next_n(
+    cur: *mut F4KvsCursor,
+    max: usize,
+    result_out: *mut F4KvsScanResult,
+) -> F4KvsResult {
+    if cur.is_null() || result_out.is_null() {
+        set_last_error("Invalid argument: cursor or result_out is null");
+        return F4KvsResult::ErrorInvalidArgument;
+    }
+    let cur = &mut *cur;
+    if cur.done || max == 0 {
+        (*result_out).pairs = ptr::null_mut();
+        (*result_out).count = 0;
+        return F4KvsResult::Success;
+    }
+    let prefix = cur.prefix.clone();
+    let mut after = cur.after.clone();
+    let engine = Arc::clone(&cur.engine);
+    let pulled = block_on(async {
+        let mut items = Vec::new();
+        let mut eof = false;
+        for _ in 0..max {
+            match engine.scan_next(&prefix, after.as_deref()).await {
+                Ok(Some((k, v))) => {
+                    after = Some(k.clone());
+                    items.push((k, v));
+                }
+                Ok(None) => {
+                    eof = true;
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok((items, eof, after))
+    });
+    match pulled {
+        Ok((items, eof, after)) => {
+            cur.after = after;
+            cur.done = eof;
+            fill_scan_result(items, result_out)
+        }
+        Err(e) => {
+            set_last_error(&format!("Cursor next failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+    }
+}
+
+/// # Safety
+/// `cur` from `cursor_open` or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_cursor_free(cur: *mut F4KvsCursor) {
+    if !cur.is_null() {
+        drop(Box::from_raw(cur));
+    }
+}

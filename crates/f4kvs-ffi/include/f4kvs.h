@@ -299,6 +299,12 @@ F4KvsResult f4kvs_engine_scan_prefix_kv(F4KvsEngine *engine, const uint8_t *pref
 F4KvsResult f4kvs_engine_scan_prefix_keys_kv(F4KvsEngine *engine, const uint8_t *prefix,
                                              size_t prefix_len, F4KvsKeyScanResult *result_out);
 
+/** Incremental prefix scan (does not load the whole prefix). */
+typedef struct F4KvsCursor F4KvsCursor;
+F4KvsCursor *f4kvs_engine_cursor_open(F4KvsEngine *engine, const uint8_t *prefix, size_t prefix_len);
+F4KvsResult f4kvs_engine_cursor_next_n(F4KvsCursor *cur, size_t max, F4KvsScanResult *result_out);
+void f4kvs_engine_cursor_free(F4KvsCursor *cur);
+
 #ifdef __cplusplus
 }
 #endif

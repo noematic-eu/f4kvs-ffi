@@ -285,3 +285,40 @@ fn test_binary_kv_roundtrip_no_hex() {
         f4kvs_engine_free(engine);
     }
 }
+
+#[test]
+fn test_cursor_pages_in_order() {
+    unsafe {
+        let engine = f4kvs_engine_new();
+        assert!(!engine.is_null());
+        for i in 0..10 {
+            let k = format!("p/{i:02}");
+            let v = format!("v{i}");
+            let put = f4kvs_engine_put_kv(engine, k.as_ptr(), k.len(), v.as_ptr(), v.len());
+            assert_eq!(put, F4KvsResult::Success);
+        }
+        let prefix = b"p/";
+        let cur = f4kvs_engine_cursor_open(engine, prefix.as_ptr(), prefix.len());
+        assert!(!cur.is_null());
+        let mut result = std::mem::zeroed::<F4KvsScanResult>();
+        assert_eq!(
+            f4kvs_engine_cursor_next_n(cur, 3, &mut result),
+            F4KvsResult::Success
+        );
+        assert_eq!(result.count, 3);
+        f4kvs_scan_result_free(&mut result);
+        assert_eq!(
+            f4kvs_engine_cursor_next_n(cur, 100, &mut result),
+            F4KvsResult::Success
+        );
+        assert_eq!(result.count, 7);
+        f4kvs_scan_result_free(&mut result);
+        assert_eq!(
+            f4kvs_engine_cursor_next_n(cur, 10, &mut result),
+            F4KvsResult::Success
+        );
+        assert_eq!(result.count, 0);
+        f4kvs_engine_cursor_free(cur);
+        f4kvs_engine_free(engine);
+    }
+}
