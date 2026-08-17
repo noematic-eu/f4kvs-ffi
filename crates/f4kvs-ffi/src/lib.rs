@@ -4,6 +4,7 @@
 
 use f4kvs_lsm::core::config::{WalDurability, WalEngine, WalSyncMode};
 use f4kvs_lsm::{LsmConfig, LsmTreeEngine};
+use f4kvs_lsm::core::PrefixScanState;
 use f4kvs_storage_core::traits::StorageEngine;
 use f4kvs_value::Value;
 use std::cell::RefCell;
@@ -1541,8 +1542,8 @@ pub unsafe extern "C" fn f4kvs_engine_scan_prefix_keys_kv(
 /// Incremental prefix scan. Does not materialize the whole prefix.
 pub struct F4KvsCursor {
     engine: Arc<LsmTreeEngine>,
+    state: Option<PrefixScanState>,
     prefix: String,
-    after: Option<String>,
     done: bool,
 }
 
@@ -1566,8 +1567,8 @@ pub unsafe extern "C" fn f4kvs_engine_cursor_open(
     };
     Box::into_raw(Box::new(F4KvsCursor {
         engine: Arc::clone(&engine_ref.engine),
+        state: None,
         prefix,
-        after: None,
         done: false,
     }))
 }
@@ -1593,17 +1594,23 @@ pub unsafe extern "C" fn f4kvs_engine_cursor_next_n(
         return F4KvsResult::Success;
     }
     let prefix = cur.prefix.clone();
-    let mut after = cur.after.clone();
     let engine = Arc::clone(&cur.engine);
+    let mut state = match cur.state.take() {
+        Some(s) => s,
+        None => match block_on(engine.prefix_scan_start(&prefix)) {
+            Ok(s) => s,
+            Err(e) => {
+                set_last_error(&format!("Cursor start failed: {}", e));
+                return F4KvsResult::ErrorStorage;
+            }
+        },
+    };
     let pulled = block_on(async {
         let mut items = Vec::new();
         let mut eof = false;
         for _ in 0..max {
-            match engine.scan_next(&prefix, after.as_deref()).await {
-                Ok(Some((k, v))) => {
-                    after = Some(k.clone());
-                    items.push((k, v));
-                }
+            match engine.prefix_scan_next(&mut state).await {
+                Ok(Some((k, v))) => items.push((k, v)),
                 Ok(None) => {
                     eof = true;
                     break;
@@ -1611,12 +1618,14 @@ pub unsafe extern "C" fn f4kvs_engine_cursor_next_n(
                 Err(e) => return Err(e),
             }
         }
-        Ok((items, eof, after))
+        Ok((items, eof))
     });
     match pulled {
-        Ok((items, eof, after)) => {
-            cur.after = after;
+        Ok((items, eof)) => {
             cur.done = eof;
+            if !eof {
+                cur.state = Some(state);
+            }
             fill_scan_result(items, result_out)
         }
         Err(e) => {
