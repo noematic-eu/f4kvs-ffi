@@ -104,6 +104,20 @@ typedef struct {
      * compact_if_needed is a no-op until the destination is reopened normally.
      */
     uint32_t max_sstables_per_level;
+    /**
+     * Memtable size in bytes (0 = default 64 MiB). One flush writes one L0
+     * file, so this is the ingest file-size knob.
+     */
+    uint32_t memtable_max_size;
+    /**
+     * Compaction output target in bytes (0 = default 64 MiB).
+     */
+    uint32_t sstable_target_size;
+    /**
+     * Compaction output max in bytes (0 = default 128 MiB). Raised automatically
+     * if below sstable_target_size.
+     */
+    uint32_t sstable_max_size;
 } F4KvsOpenOptions;
 
 /** @see F4KvsOpenOptions.wal_durability */

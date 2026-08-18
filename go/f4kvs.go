@@ -42,10 +42,10 @@ type F4KVS struct {
 // OpenOptions tunes WAL behavior when opening a persistent engine.
 // Zero values select library defaults.
 type OpenOptions struct {
-	GroupCommitEnabled      bool
-	GroupCommitMaxWaitMs    uint32
-	GroupCommitMaxBatchSz   uint32
-	GroupCommitWaitDurable  bool
+	GroupCommitEnabled     bool
+	GroupCommitMaxWaitMs   uint32
+	GroupCommitMaxBatchSz  uint32
+	GroupCommitWaitDurable bool
 	// WalEngine: 0 = segment (default), 1 = frame, 2 = indexed (WAL v2)
 	WalEngine uint8
 	// WalDurability: 0 = strict, 1 = amortized, 2 = buffered
@@ -58,6 +58,12 @@ type OpenOptions struct {
 	CompactionBackground uint8
 	// MaxSSTablesPerLevel: L0 file-count trigger (0 = default 10).
 	MaxSSTablesPerLevel uint32
+	// MemtableMaxSize: bytes (0 = default 64 MiB). One flush = one L0 file.
+	MemtableMaxSize uint32
+	// SstableTargetSize: compaction output target bytes (0 = default 64 MiB).
+	SstableTargetSize uint32
+	// SstableMaxSize: compaction output max bytes (0 = default 128 MiB).
+	SstableMaxSize uint32
 }
 
 // NewMemoryEngine opens an ephemeral engine in a temporary directory.
@@ -94,6 +100,9 @@ func NewPersistentEngineWithOptions(path string, opts *OpenOptions) (*F4KVS, err
 			max_batch_size:              C.uint(opts.MaxBatchSize),
 			compaction_background:       C.uchar(opts.CompactionBackground),
 			max_sstables_per_level:      C.uint(opts.MaxSSTablesPerLevel),
+			memtable_max_size:           C.uint(opts.MemtableMaxSize),
+			sstable_target_size:         C.uint(opts.SstableTargetSize),
+			sstable_max_size:            C.uint(opts.SstableMaxSize),
 		}
 		if opts.GroupCommitEnabled {
 			copts.group_commit_enabled = 1

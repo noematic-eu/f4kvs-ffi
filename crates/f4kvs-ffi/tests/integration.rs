@@ -306,6 +306,9 @@ fn test_open_amortized_wal_durability() {
             max_batch_size: 0,
             compaction_background: 0,
             max_sstables_per_level: 0,
+            memtable_max_size: 0,
+            sstable_target_size: 0,
+            sstable_max_size: 0,
         };
         let engine = f4kvs_engine_open_ex(dir_c.as_ptr(), &options);
         assert!(!engine.is_null());
@@ -348,6 +351,9 @@ fn test_open_indexed_wal_engine() {
             max_batch_size: 0,
             compaction_background: 0,
             max_sstables_per_level: 0,
+            memtable_max_size: 0,
+            sstable_target_size: 0,
+            sstable_max_size: 0,
         };
         let engine = f4kvs_engine_open_ex(dir_c.as_ptr(), &options);
         assert!(!engine.is_null());

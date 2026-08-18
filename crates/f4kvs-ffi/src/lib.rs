@@ -136,6 +136,12 @@ pub struct F4KvsOpenOptions {
     pub compaction_background: c_uchar,
     /// L0 file-count trigger (0 = default).
     pub max_sstables_per_level: c_uint,
+    /// Memtable size in bytes (0 = default 64 MiB).
+    pub memtable_max_size: c_uint,
+    /// Compaction output target in bytes (0 = default 64 MiB).
+    pub sstable_target_size: c_uint,
+    /// Compaction output max in bytes (0 = default 128 MiB).
+    pub sstable_max_size: c_uint,
 }
 
 fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>) {
@@ -188,6 +194,18 @@ fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>
     }
     if options.max_sstables_per_level > 0 {
         config.levels.max_sstables_per_level = options.max_sstables_per_level as usize;
+    }
+    if options.memtable_max_size > 0 {
+        config.memtable.max_size = options.memtable_max_size as usize;
+    }
+    if options.sstable_target_size > 0 {
+        config.sstable.target_size = options.sstable_target_size as usize;
+    }
+    if options.sstable_max_size > 0 {
+        config.sstable.max_size = options.sstable_max_size as usize;
+    }
+    if config.sstable.max_size < config.sstable.target_size {
+        config.sstable.max_size = config.sstable.target_size;
     }
 }
 
