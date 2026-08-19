@@ -3,19 +3,25 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use f4kvs_lsm::core::config::{WalDurability, WalEngine, WalSyncMode};
-use f4kvs_lsm::{LsmConfig, LsmTreeEngine};
 use f4kvs_lsm::core::PrefixScanState;
+use f4kvs_lsm::{LsmConfig, LsmTreeEngine};
 use f4kvs_storage_core::traits::StorageEngine;
 use f4kvs_value::Value;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_uint, c_uchar};
-use std::time::Duration;
+use std::os::raw::{c_char, c_int, c_uchar, c_uint};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+#[cfg(test)]
+thread_local! {
+    /// When true, the next `cursor_next_n` fails after taking scan state.
+    static CURSOR_FAIL_NEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 use tokio::runtime::{Handle, Runtime};
 
 /// Maximum key length in bytes (1MB default)
@@ -62,9 +68,7 @@ pub struct F4KvsEngine {
 }
 
 fn runtime() -> &'static Runtime {
-    RUNTIME.get_or_init(|| {
-        Runtime::new().expect("failed to create Tokio runtime for f4kvs-ffi")
-    })
+    RUNTIME.get_or_init(|| Runtime::new().expect("failed to create Tokio runtime for f4kvs-ffi"))
 }
 
 fn runtime_handle() -> &'static Handle {
@@ -170,8 +174,9 @@ fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>
         config.wal.group_commit_wait_durable = true;
     }
     if options.group_commit_idle_flush_ms > 0 {
-        config.wal.group_commit_idle_flush =
-            Some(Duration::from_millis(options.group_commit_idle_flush_ms as u64));
+        config.wal.group_commit_idle_flush = Some(Duration::from_millis(
+            options.group_commit_idle_flush_ms as u64,
+        ));
     } else if durability == WalDurability::Amortized && config.wal.group_commit_idle_flush.is_none()
     {
         config.wal.group_commit_idle_flush = Some(Duration::from_millis(100));
@@ -221,9 +226,9 @@ fn open_lsm_engine(
     apply_open_options(&mut config, options);
 
     let engine = block_on(LsmTreeEngine::new(config)).map_err(|e| {
-            set_last_error(&format!("Failed to open LSM engine: {}", e));
-            F4KvsResult::ErrorStorage
-        })?;
+        set_last_error(&format!("Failed to open LSM engine: {}", e));
+        F4KvsResult::ErrorStorage
+    })?;
 
     Ok(F4KvsEngine {
         engine: Arc::new(engine),
@@ -349,7 +354,11 @@ impl BytesAllocator {
         if ptr.is_null() {
             return false;
         }
-        self.allocations.lock().unwrap().insert(ptr as usize, len).is_none()
+        self.allocations
+            .lock()
+            .unwrap()
+            .insert(ptr as usize, len)
+            .is_none()
     }
 
     fn unregister(&self, ptr: *mut u8) -> Option<usize> {
@@ -358,7 +367,6 @@ impl BytesAllocator {
         }
         self.allocations.lock().unwrap().remove(&(ptr as usize))
     }
-
 }
 
 static STRING_ALLOCATOR: OnceLock<StringAllocator> = OnceLock::new();
@@ -567,9 +575,7 @@ pub unsafe extern "C" fn f4kvs_engine_set_bulk_import(
         Ok(engine) => engine,
         Err(e) => return e,
     };
-    engine_ref
-        .engine
-        .set_bulk_import(enabled != 0);
+    engine_ref.engine.set_bulk_import(enabled != 0);
     F4KvsResult::Success
 }
 
@@ -730,11 +736,7 @@ pub unsafe extern "C" fn f4kvs_engine_put(
         Err(e) => return e,
     };
 
-    match block_on(
-        engine_ref
-            .engine
-            .put(&key_str, &Value::String(value_str)),
-    ) {
+    match block_on(engine_ref.engine.put(&key_str, &Value::String(value_str))) {
         Ok(_) => F4KvsResult::Success,
         Err(e) => {
             set_last_error(&format!("Put failed: {}", e));
@@ -1355,7 +1357,8 @@ pub unsafe extern "C" fn f4kvs_engine_batch_put_kv(
         Ok(engine) => engine,
         Err(e) => return e,
     };
-    if count > 0 && (keys.is_null() || key_lens.is_null() || values.is_null() || value_lens.is_null())
+    if count > 0
+        && (keys.is_null() || key_lens.is_null() || values.is_null() || value_lens.is_null())
     {
         set_last_error("Invalid argument: batch_put_kv pointer is null");
         return F4KvsResult::ErrorInvalidArgument;
@@ -1623,6 +1626,12 @@ pub unsafe extern "C" fn f4kvs_engine_cursor_next_n(
             }
         },
     };
+    #[cfg(test)]
+    if CURSOR_FAIL_NEXT.with(|f| f.replace(false)) {
+        cur.state = Some(state);
+        set_last_error("Cursor next failed: injected");
+        return F4KvsResult::ErrorStorage;
+    }
     let pulled = block_on(async {
         let mut items = Vec::new();
         let mut eof = false;
@@ -1647,6 +1656,9 @@ pub unsafe extern "C" fn f4kvs_engine_cursor_next_n(
             fill_scan_result(items, result_out)
         }
         Err(e) => {
+            // Keep the scan head. Dropping it rewound the next call to
+            // prefix_scan_start and re-emitted already-returned keys.
+            cur.state = Some(state);
             set_last_error(&format!("Cursor next failed: {}", e));
             F4KvsResult::ErrorStorage
         }
@@ -1659,5 +1671,66 @@ pub unsafe extern "C" fn f4kvs_engine_cursor_next_n(
 pub unsafe extern "C" fn f4kvs_engine_cursor_free(cur: *mut F4KvsCursor) {
     if !cur.is_null() {
         drop(Box::from_raw(cur));
+    }
+}
+
+#[cfg(test)]
+mod cursor_error_tests {
+    use super::*;
+
+    unsafe fn pair_key(result: &F4KvsScanResult, i: usize) -> String {
+        let pair = &*result.pairs.add(i);
+        CStr::from_ptr(pair.key).to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn cursor_next_error_does_not_replay_keys() {
+        unsafe {
+            let engine = f4kvs_engine_new();
+            assert!(!engine.is_null());
+            for i in 0..10 {
+                let k = format!("p/{i:02}");
+                let v = format!("v{i}");
+                assert_eq!(
+                    f4kvs_engine_put_kv(engine, k.as_ptr(), k.len(), v.as_ptr(), v.len()),
+                    F4KvsResult::Success
+                );
+            }
+            let prefix = b"p/";
+            let cur = f4kvs_engine_cursor_open(engine, prefix.as_ptr(), prefix.len());
+            assert!(!cur.is_null());
+
+            let mut result = std::mem::zeroed::<F4KvsScanResult>();
+            assert_eq!(
+                f4kvs_engine_cursor_next_n(cur, 3, &mut result),
+                F4KvsResult::Success
+            );
+            assert_eq!(result.count, 3);
+            let first_page: Vec<String> = (0..result.count).map(|i| pair_key(&result, i)).collect();
+            assert_eq!(first_page, ["p/00", "p/01", "p/02"]);
+            f4kvs_scan_result_free(&mut result);
+
+            CURSOR_FAIL_NEXT.with(|f| f.set(true));
+            assert_eq!(
+                f4kvs_engine_cursor_next_n(cur, 100, &mut result),
+                F4KvsResult::ErrorStorage
+            );
+            assert!(!(*cur).done);
+            assert!((*cur).state.is_some());
+
+            assert_eq!(
+                f4kvs_engine_cursor_next_n(cur, 100, &mut result),
+                F4KvsResult::Success
+            );
+            assert_eq!(result.count, 7);
+            let rest: Vec<String> = (0..result.count).map(|i| pair_key(&result, i)).collect();
+            assert_eq!(
+                rest,
+                ["p/03", "p/04", "p/05", "p/06", "p/07", "p/08", "p/09"]
+            );
+            f4kvs_scan_result_free(&mut result);
+            f4kvs_engine_cursor_free(cur);
+            f4kvs_engine_free(engine);
+        }
     }
 }
