@@ -3,6 +3,8 @@
 package f4kvs_test
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	f4kvs "github.com/noematic-eu/f4kvs-go"
@@ -52,5 +54,50 @@ func TestBatchPutBytesAndTransactionCommit(t *testing.T) {
 	}
 	if string(got) != "txn-payload" {
 		t.Fatalf("txn put = %q", got)
+	}
+}
+
+func TestConcurrentGetsSameEngine(t *testing.T) {
+	engine, err := f4kvs.NewMemoryEngine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	const n = 64
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("k/%02d", i)
+		if err := engine.Put(key, "v"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		i := i
+		go func() {
+			defer wg.Done()
+			key := fmt.Sprintf("k/%02d", i)
+			got, err := engine.Get(key)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if got != "v" {
+				errCh <- fmt.Errorf("get %q = %q", key, got)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+
+	engine.Close()
+	if _, err := engine.Get("k/00"); err != f4kvs.ErrClosed {
+		t.Fatalf("get after close: %v", err)
 	}
 }

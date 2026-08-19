@@ -27,9 +27,11 @@ whenever a limitation is fixed or a new one is found.
   *Workaround: use `BatchPutBytes`, or enable group commit / amortized WAL
   when the durability window is acceptable.*
 - **FFI Gets are concurrent** (`Handle::block_on` from CGO threads). The old
-  process-wide `FFI_MUTEX` is gone. Compaction merge no longer holds the
-  exclusive operation lock; flush+WAL-truncate still does. Small shards keep
-  SST file descriptors open so Get does not reopen.
+  process-wide `FFI_MUTEX` is gone. The Go wrapper uses `RWMutex` (`RLock`
+  for ops, exclusive `Lock` only for `Close`) so concurrent Gets overlap.
+  Compaction merge no longer holds the exclusive operation lock;
+  flush+WAL-truncate still does. Small shards keep SST file descriptors
+  open so Get does not reopen.
 
 ## API and FFI
 

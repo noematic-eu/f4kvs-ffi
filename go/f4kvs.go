@@ -33,10 +33,25 @@ const (
 )
 
 // F4KVS wraps the f4kvs-ffi LSM engine.
+//
+// Ops take RLock so concurrent Gets/Puts overlap (the C engine is
+// thread-safe). Close takes the exclusive Lock and waits for in-flight ops
+// before freeing the handle.
 type F4KVS struct {
 	handle *C.F4KvsEngine
-	mu     sync.Mutex
+	mu     sync.RWMutex
 	closed bool
+}
+
+// rLockLive takes RLock and checks the handle is live. Caller must RUnlock
+// on nil error. Close cannot run while this lock is held.
+func (e *F4KVS) rLockLive() error {
+	e.mu.RLock()
+	if e.closed || e.handle == nil {
+		e.mu.RUnlock()
+		return ErrClosed
+	}
+	return nil
 }
 
 // OpenOptions tunes WAL behavior when opening a persistent engine.
@@ -136,11 +151,10 @@ func (e *F4KVS) Put(key, value string) error {
 }
 
 func (e *F4KVS) GetBytes(key string) ([]byte, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed || e.handle == nil {
-		return nil, ErrClosed
+	if err := e.rLockLive(); err != nil {
+		return nil, err
 	}
+	defer e.mu.RUnlock()
 
 	ckey := C.CString(key)
 	defer C.free(unsafe.Pointer(ckey))
@@ -163,11 +177,10 @@ func (e *F4KVS) GetBytes(key string) ([]byte, error) {
 }
 
 func (e *F4KVS) PutBytes(key string, value []byte) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed || e.handle == nil {
-		return ErrClosed
+	if err := e.rLockLive(); err != nil {
+		return err
 	}
+	defer e.mu.RUnlock()
 
 	ckey := C.CString(key)
 	defer C.free(unsafe.Pointer(ckey))
@@ -184,11 +197,10 @@ func (e *F4KVS) PutBytes(key string, value []byte) error {
 }
 
 func (e *F4KVS) Delete(key string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed || e.handle == nil {
-		return ErrClosed
+	if err := e.rLockLive(); err != nil {
+		return err
 	}
+	defer e.mu.RUnlock()
 
 	ckey := C.CString(key)
 	defer C.free(unsafe.Pointer(ckey))
@@ -209,8 +221,8 @@ func (e *F4KVS) GetAllKeys() []string {
 
 // ScanPrefixKeys returns keys with the given prefix.
 func (e *F4KVS) ScanPrefixKeys(prefix string) []string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	if e.closed || e.handle == nil {
 		return nil
 	}
@@ -255,11 +267,10 @@ func (e *F4KVS) BatchPutBytes(items map[string][]byte) error {
 		return nil
 	}
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed || e.handle == nil {
-		return ErrClosed
+	if err := e.rLockLive(); err != nil {
+		return err
 	}
+	defer e.mu.RUnlock()
 
 	keys := make([]string, 0, len(items))
 	values := make([][]byte, 0, len(items))
@@ -316,11 +327,10 @@ func (e *F4KVS) BatchDelete(keys []string) error {
 		return nil
 	}
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed || e.handle == nil {
-		return ErrClosed
+	if err := e.rLockLive(); err != nil {
+		return err
 	}
+	defer e.mu.RUnlock()
 
 	cKeys := make([]*C.char, len(keys))
 	for i, key := range keys {
@@ -341,11 +351,10 @@ func (e *F4KVS) BatchDelete(keys []string) error {
 
 // SetBulkImport enables LSM bulk-import mode (faster vault tree batch_put).
 func (e *F4KVS) SetBulkImport(on bool) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed || e.handle == nil {
-		return ErrClosed
+	if err := e.rLockLive(); err != nil {
+		return err
 	}
+	defer e.mu.RUnlock()
 	enabled := C.uchar(0)
 	if on {
 		enabled = 1
@@ -358,11 +367,10 @@ func (e *F4KVS) SetBulkImport(on bool) error {
 }
 
 func (e *F4KVS) Flush() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed || e.handle == nil {
-		return ErrClosed
+	if err := e.rLockLive(); err != nil {
+		return err
 	}
+	defer e.mu.RUnlock()
 	res := C.f4kvs_engine_flush(e.handle)
 	if res != C.F4KVS_SUCCESS {
 		return fmt.Errorf("f4kvs flush: %s", lastError())
@@ -372,11 +380,10 @@ func (e *F4KVS) Flush() error {
 
 // FlushWAL drains the group-commit queue and syncs WAL segments without flushing memtable to SSTable.
 func (e *F4KVS) FlushWAL() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed || e.handle == nil {
-		return ErrClosed
+	if err := e.rLockLive(); err != nil {
+		return err
 	}
+	defer e.mu.RUnlock()
 	res := C.f4kvs_engine_flush_wal(e.handle)
 	if res != C.F4KVS_SUCCESS {
 		return fmt.Errorf("f4kvs flush wal: %s", lastError())
@@ -385,11 +392,10 @@ func (e *F4KVS) FlushWAL() error {
 }
 
 func (e *F4KVS) Sync() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed || e.handle == nil {
-		return ErrClosed
+	if err := e.rLockLive(); err != nil {
+		return err
 	}
+	defer e.mu.RUnlock()
 	res := C.f4kvs_engine_compact(e.handle)
 	if res != C.F4KVS_SUCCESS {
 		return fmt.Errorf("f4kvs sync: %s", lastError())
