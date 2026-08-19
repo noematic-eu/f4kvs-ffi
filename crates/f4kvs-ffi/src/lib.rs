@@ -119,14 +119,46 @@ unsafe fn key_from_raw<'a>(
     key_from_bytes(std::slice::from_raw_parts(ptr, len), field)
 }
 
+fn reject_batch_count(engine: &LsmTreeEngine, count: usize) -> Option<F4KvsResult> {
+    let max = engine.config().performance.max_batch_size;
+    if count > max {
+        set_last_error(&format!(
+            "Invalid argument: batch count {count} exceeds max_batch_size {max}"
+        ));
+        Some(F4KvsResult::ErrorInvalidArgument)
+    } else {
+        None
+    }
+}
+
 fn unique_data_dir() -> PathBuf {
     let id = ENGINE_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("f4kvs_ffi_{}_{}", std::process::id(), id))
 }
 
+/// Pre-struct_size layout. First word is group_commit_enabled (0/1).
+#[repr(C)]
+struct F4KvsOpenOptionsV0 {
+    group_commit_enabled: c_uchar,
+    group_commit_max_wait_ms: c_uint,
+    group_commit_max_batch_size: c_uint,
+    group_commit_wait_durable: c_uchar,
+    wal_engine: c_uchar,
+    wal_durability: c_uchar,
+    group_commit_idle_flush_ms: c_uint,
+    max_batch_size: c_uint,
+    compaction_background: c_uchar,
+    max_sstables_per_level: c_uint,
+    memtable_max_size: c_uint,
+    sstable_target_size: c_uint,
+    sstable_max_size: c_uint,
+}
+
 /// FFI mirror of `F4KvsOpenOptions` from f4kvs.h
 #[repr(C)]
 pub struct F4KvsOpenOptions {
+    /// Must be `size_of::<Self>()`. Values below 8 are a legacy V0 layout.
+    pub struct_size: c_uint,
     pub group_commit_enabled: c_uchar,
     pub group_commit_max_wait_ms: c_uint,
     pub group_commit_max_batch_size: c_uint,
@@ -146,6 +178,68 @@ pub struct F4KvsOpenOptions {
     pub sstable_target_size: c_uint,
     /// Compaction output max in bytes (0 = default 128 MiB).
     pub sstable_max_size: c_uint,
+}
+
+/// Versioned layouts start at `struct_size`. Legacy first word is 0 or 1.
+const MIN_VERSIONED_OPEN_OPTIONS: u32 = 8;
+
+impl F4KvsOpenOptions {
+    pub fn new() -> Self {
+        Self {
+            struct_size: std::mem::size_of::<Self>() as c_uint,
+            group_commit_enabled: 0,
+            group_commit_max_wait_ms: 0,
+            group_commit_max_batch_size: 0,
+            group_commit_wait_durable: 0,
+            wal_engine: 0,
+            wal_durability: 0,
+            group_commit_idle_flush_ms: 0,
+            max_batch_size: 0,
+            compaction_background: 0,
+            max_sstables_per_level: 0,
+            memtable_max_size: 0,
+            sstable_target_size: 0,
+            sstable_max_size: 0,
+        }
+    }
+}
+
+impl From<F4KvsOpenOptionsV0> for F4KvsOpenOptions {
+    fn from(old: F4KvsOpenOptionsV0) -> Self {
+        Self {
+            struct_size: 0,
+            group_commit_enabled: old.group_commit_enabled,
+            group_commit_max_wait_ms: old.group_commit_max_wait_ms,
+            group_commit_max_batch_size: old.group_commit_max_batch_size,
+            group_commit_wait_durable: old.group_commit_wait_durable,
+            wal_engine: old.wal_engine,
+            wal_durability: old.wal_durability,
+            group_commit_idle_flush_ms: old.group_commit_idle_flush_ms,
+            max_batch_size: old.max_batch_size,
+            compaction_background: old.compaction_background,
+            max_sstables_per_level: old.max_sstables_per_level,
+            memtable_max_size: old.memtable_max_size,
+            sstable_target_size: old.sstable_target_size,
+            sstable_max_size: old.sstable_max_size,
+        }
+    }
+}
+
+/// Copy at most `declared` bytes. Never reads past the caller's struct.
+unsafe fn read_open_options(ptr: *const F4KvsOpenOptions) -> Option<F4KvsOpenOptions> {
+    if ptr.is_null() {
+        return None;
+    }
+    let first = ptr::read_unaligned(ptr as *const u32);
+    if first < MIN_VERSIONED_OPEN_OPTIONS {
+        return Some(F4KvsOpenOptions::from(ptr::read_unaligned(
+            ptr as *const F4KvsOpenOptionsV0,
+        )));
+    }
+    let n = (first as usize).min(std::mem::size_of::<F4KvsOpenOptions>());
+    let mut buf = std::mem::MaybeUninit::<F4KvsOpenOptions>::zeroed();
+    ptr::copy_nonoverlapping(ptr as *const u8, buf.as_mut_ptr() as *mut u8, n);
+    Some(buf.assume_init())
 }
 
 fn apply_open_options(config: &mut LsmConfig, options: Option<&F4KvsOpenOptions>) {
@@ -496,13 +590,8 @@ pub unsafe extern "C" fn f4kvs_engine_open_ex(
         Err(_) => return ptr::null_mut(),
     };
 
-    let opts = if options.is_null() {
-        None
-    } else {
-        Some(&*options)
-    };
-
-    match open_lsm_engine(path, opts) {
+    let owned = unsafe { read_open_options(options) };
+    match open_lsm_engine(path, owned.as_ref()) {
         Ok(engine) => Box::into_raw(Box::new(engine)),
         Err(e) => {
             set_last_error(&format!("Failed to open engine: {:?}", e));
@@ -810,6 +899,9 @@ pub unsafe extern "C" fn f4kvs_engine_batch_put_bytes(
         Ok(engine) => engine,
         Err(e) => return e,
     };
+    if let Some(e) = reject_batch_count(&engine_ref.engine, count) {
+        return e;
+    }
 
     if count > 0 && (keys.is_null() || values.is_null() || value_lens.is_null()) {
         set_last_error("Invalid argument: keys, values, or value_lens is null");
@@ -993,6 +1085,9 @@ pub unsafe extern "C" fn f4kvs_engine_batch_delete(
         Ok(engine) => engine,
         Err(e) => return e,
     };
+    if let Some(e) = reject_batch_count(&engine_ref.engine, count) {
+        return e;
+    }
 
     if count > 0 && keys.is_null() {
         set_last_error("Invalid argument: keys is null");
@@ -1357,6 +1452,9 @@ pub unsafe extern "C" fn f4kvs_engine_batch_put_kv(
         Ok(engine) => engine,
         Err(e) => return e,
     };
+    if let Some(e) = reject_batch_count(&engine_ref.engine, count) {
+        return e;
+    }
     if count > 0
         && (keys.is_null() || key_lens.is_null() || values.is_null() || value_lens.is_null())
     {
@@ -1408,6 +1506,9 @@ pub unsafe extern "C" fn f4kvs_engine_batch_delete_kv(
         Ok(engine) => engine,
         Err(e) => return e,
     };
+    if let Some(e) = reject_batch_count(&engine_ref.engine, count) {
+        return e;
+    }
     if count > 0 && (keys.is_null() || key_lens.is_null()) {
         set_last_error("Invalid argument: batch_delete_kv pointer is null");
         return F4KvsResult::ErrorInvalidArgument;
@@ -1730,6 +1831,81 @@ mod cursor_error_tests {
             );
             f4kvs_scan_result_free(&mut result);
             f4kvs_engine_cursor_free(cur);
+            f4kvs_engine_free(engine);
+        }
+    }
+}
+
+#[cfg(test)]
+mod open_options_and_batch_cap_tests {
+    use super::*;
+
+    fn field_offset<T, F>(base: &T, field: &F) -> usize {
+        let b = base as *const T as usize;
+        let f = field as *const F as usize;
+        f - b
+    }
+
+    #[test]
+    fn versioned_open_options_ignore_fields_past_struct_size() {
+        let mut opts = F4KvsOpenOptions::new();
+        opts.wal_durability = 1;
+        opts.memtable_max_size = 1_048_576;
+        let cut = field_offset(&opts, &opts.memtable_max_size) as c_uint;
+        opts.struct_size = cut;
+
+        let read = unsafe { read_open_options(&opts) }.expect("read");
+        assert_eq!(read.wal_durability, 1);
+        assert_eq!(read.memtable_max_size, 0);
+
+        let mut config = LsmConfig::default();
+        let default_mem = config.memtable.max_size;
+        apply_open_options(&mut config, Some(&read));
+        assert!(config.wal.group_commit_enabled);
+        assert_eq!(config.memtable.max_size, default_mem);
+    }
+
+    #[test]
+    fn legacy_open_options_without_struct_size_still_apply() {
+        let legacy = F4KvsOpenOptionsV0 {
+            group_commit_enabled: 1,
+            group_commit_max_wait_ms: 50,
+            group_commit_max_batch_size: 0,
+            group_commit_wait_durable: 0,
+            wal_engine: 2,
+            wal_durability: 0,
+            group_commit_idle_flush_ms: 0,
+            max_batch_size: 0,
+            compaction_background: 0,
+            max_sstables_per_level: 0,
+            memtable_max_size: 0,
+            sstable_target_size: 0,
+            sstable_max_size: 0,
+        };
+        let first = unsafe { ptr::read_unaligned(&legacy as *const _ as *const u32) };
+        assert!(first < MIN_VERSIONED_OPEN_OPTIONS);
+
+        let read = unsafe { read_open_options(&legacy as *const _ as *const F4KvsOpenOptions) }
+            .expect("legacy");
+        assert_eq!(read.group_commit_enabled, 1);
+        assert_eq!(read.group_commit_max_wait_ms, 50);
+        assert_eq!(read.wal_engine, 2);
+    }
+
+    #[test]
+    fn batch_put_kv_rejects_count_over_max_before_alloc() {
+        unsafe {
+            let engine = f4kvs_engine_new();
+            assert!(!engine.is_null());
+            let rc = f4kvs_engine_batch_put_kv(
+                engine,
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                ptr::null(),
+                1_000_000_000,
+            );
+            assert_eq!(rc, F4KvsResult::ErrorInvalidArgument);
             f4kvs_engine_free(engine);
         }
     }

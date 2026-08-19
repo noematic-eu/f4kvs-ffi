@@ -73,21 +73,7 @@ fn assert_success(result: F4KvsResult, what: &str) {
 }
 
 fn default_open_options() -> F4KvsOpenOptions {
-    F4KvsOpenOptions {
-        group_commit_enabled: 0,
-        group_commit_max_wait_ms: 0,
-        group_commit_max_batch_size: 0,
-        group_commit_wait_durable: 0,
-        wal_engine: 0,
-        wal_durability: 0,
-        group_commit_idle_flush_ms: 0,
-        max_batch_size: 0,
-        compaction_background: 0,
-        max_sstables_per_level: 0,
-        memtable_max_size: 0,
-        sstable_target_size: 0,
-        sstable_max_size: 0,
-    }
+    F4KvsOpenOptions::new()
 }
 
 fn batch_put_n(engine: *mut F4KvsEngine, prefix: &str, start: usize, count: usize) -> F4KvsResult {
@@ -276,15 +262,7 @@ fn test_group_commit_wait_durable_large_batch_no_hang() {
         group_commit_max_wait_ms: 10,
         group_commit_max_batch_size: 1000,
         group_commit_wait_durable: 1,
-        wal_engine: 0,
-        wal_durability: 0,
-        group_commit_idle_flush_ms: 0,
-        max_batch_size: 0,
-        compaction_background: 0,
-        max_sstables_per_level: 0,
-        memtable_max_size: 0,
-        sstable_target_size: 0,
-        sstable_max_size: 0,
+        ..F4KvsOpenOptions::new()
     };
     let engine = unsafe { f4kvs_engine_open_ex(dir.as_ptr(), &options) };
     assert!(!engine.is_null());

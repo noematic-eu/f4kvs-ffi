@@ -69,8 +69,16 @@ typedef struct F4KvsEngine F4KvsEngine;
 
 /**
  * Optional engine open parameters. Zero values select library defaults.
+ *
+ * Set struct_size = sizeof(F4KvsOpenOptions) (see F4KVS_OPEN_OPTIONS_INIT).
+ * A newer library then reads only the prefix the caller actually provided.
  */
 typedef struct {
+    /**
+     * Must be sizeof(F4KvsOpenOptions). Values below 8 are treated as a
+     * pre-struct_size layout (first field was group_commit_enabled).
+     */
+    uint32_t struct_size;
     /** 1 to enable WAL group commit for single puts/deletes; 0 = disabled. */
     uint8_t group_commit_enabled;
     /** Max group-commit wait in milliseconds (0 = default 10 ms). */
@@ -120,6 +128,8 @@ typedef struct {
     uint32_t sstable_max_size;
 } F4KvsOpenOptions;
 
+#define F4KVS_OPEN_OPTIONS_INIT { .struct_size = sizeof(F4KvsOpenOptions) }
+
 /** @see F4KvsOpenOptions.wal_durability */
 #define F4KVS_WAL_DURABILITY_STRICT 0
 #define F4KVS_WAL_DURABILITY_AMORTIZED 1
@@ -160,6 +170,7 @@ F4KvsEngine *f4kvs_engine_open(const char *data_dir);
 /**
  * Open a persistent engine with optional WAL tuning.
  * @param options NULL for defaults (same as f4kvs_engine_open).
+ *        Non-NULL: set options->struct_size = sizeof(*options).
  */
 F4KvsEngine *f4kvs_engine_open_ex(const char *data_dir, const F4KvsOpenOptions *options);
 

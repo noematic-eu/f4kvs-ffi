@@ -105,6 +105,7 @@ func NewPersistentEngineWithOptions(path string, opts *OpenOptions) (*F4KVS, err
 		handle = C.f4kvs_engine_open(cpath)
 	} else {
 		copts := C.F4KvsOpenOptions{
+			struct_size:                 C.uint(C.sizeof_F4KvsOpenOptions),
 			group_commit_enabled:        0,
 			group_commit_max_wait_ms:    C.uint(opts.GroupCommitMaxWaitMs),
 			group_commit_max_batch_size: C.uint(opts.GroupCommitMaxBatchSz),
