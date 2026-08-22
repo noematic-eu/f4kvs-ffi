@@ -5,7 +5,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 rust-version = "1.75"
 authors = ["Baptiste Boussemart <contact@f4kvs.dev>"]
@@ -19,7 +19,7 @@ categories = ["database", "storage"]
 f4kvs-value = { git = "https://github.com/noematic-eu/f4kvs-lsm", tag = "v0.3.4", version = "0.3.4" }
 f4kvs-storage-core = { git = "https://github.com/noematic-eu/f4kvs-lsm", tag = "v0.3.4", version = "0.3.4" }
 f4kvs-lsm = { git = "https://github.com/noematic-eu/f4kvs-lsm", tag = "v0.3.4", version = "0.3.4" }
-f4kvs-ffi = { path = "crates/f4kvs-ffi", version = "0.2.2" }
+f4kvs-ffi = { path = "crates/f4kvs-ffi", version = "0.2.3" }
 
 tokio = { version = "1.48", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
