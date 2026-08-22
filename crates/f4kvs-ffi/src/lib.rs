@@ -62,6 +62,24 @@ pub struct F4KvsScanResult {
     pub count: usize,
 }
 
+/// Length-prefixed scan pair (no CString / NUL). Free key and value with
+/// `f4kvs_bytes_free`.
+#[repr(C)]
+pub struct F4KvsKVPairKv {
+    pub key: *mut u8,
+    pub key_len: usize,
+    pub value: *mut u8,
+    pub value_len: usize,
+}
+
+/// Container for `f4kvs_engine_cursor_next_n_kv`. Free with
+/// `f4kvs_scan_result_kv_free`.
+#[repr(C)]
+pub struct F4KvsScanResultKv {
+    pub pairs: *mut F4KvsKVPairKv,
+    pub count: usize,
+}
+
 /// Opaque handle to an LSM-backed F4KVS engine.
 pub struct F4KvsEngine {
     engine: Arc<LsmTreeEngine>,
@@ -1695,6 +1713,119 @@ pub unsafe extern "C" fn f4kvs_engine_cursor_open(
     }))
 }
 
+fn cursor_ensure_state(cur: &mut F4KvsCursor) -> Result<(), F4KvsResult> {
+    if cur.state.is_some() {
+        return Ok(());
+    }
+    let prefix = cur.prefix.clone();
+    let started = match cur.engine.try_prefix_scan_start_sync(&prefix) {
+        Some(r) => r,
+        None => block_on(cur.engine.prefix_scan_start(&prefix)),
+    };
+    match started {
+        Ok(s) => {
+            cur.state = Some(s);
+            Ok(())
+        }
+        Err(e) => {
+            set_last_error(&format!("Cursor start failed: {}", e));
+            Err(F4KvsResult::ErrorStorage)
+        }
+    }
+}
+
+fn cursor_pull_page(
+    cur: &mut F4KvsCursor,
+    max: usize,
+) -> Result<(Vec<(String, Value)>, bool), F4KvsResult> {
+    cursor_ensure_state(cur)?;
+    let mut state = cur.state.take().expect("cursor state");
+    let engine = Arc::clone(&cur.engine);
+    let pulled = match engine.try_prefix_scan_next_n_sync(&mut state, max) {
+        Some(r) => r,
+        None => block_on(async {
+            let mut items = Vec::new();
+            let mut eof = false;
+            for _ in 0..max {
+                match engine.prefix_scan_next(&mut state).await {
+                    Ok(Some((k, v))) => items.push((k, v)),
+                    Ok(None) => {
+                        eof = true;
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok((items, eof))
+        }),
+    };
+    match pulled {
+        Ok((items, eof)) => {
+            if !eof {
+                cur.state = Some(state);
+            }
+            Ok((items, eof))
+        }
+        Err(e) => {
+            cur.state = Some(state);
+            set_last_error(&format!("Cursor next failed: {}", e));
+            Err(F4KvsResult::ErrorStorage)
+        }
+    }
+}
+
+unsafe fn fill_scan_result_kv(
+    items: Vec<(String, Value)>,
+    result_out: *mut F4KvsScanResultKv,
+) -> F4KvsResult {
+    let count = items.len();
+    if count == 0 {
+        (*result_out).pairs = ptr::null_mut();
+        (*result_out).count = 0;
+        return F4KvsResult::Success;
+    }
+    let mut pairs: Vec<F4KvsKVPairKv> = Vec::with_capacity(count);
+    for (key, value) in items {
+        let key_bytes = key.into_bytes();
+        let key_len = key_bytes.len();
+        let (key_ptr, _) = match allocate_bytes(key_bytes) {
+            Ok(a) => a,
+            Err(e) => {
+                for pair in &pairs {
+                    f4kvs_bytes_free(pair.key);
+                    f4kvs_bytes_free(pair.value);
+                }
+                return e;
+            }
+        };
+        let val_bytes = value_to_bytes(value);
+        let value_len = val_bytes.len();
+        let (value_ptr, _) = match allocate_bytes(val_bytes) {
+            Ok(a) => a,
+            Err(e) => {
+                f4kvs_bytes_free(key_ptr);
+                for pair in &pairs {
+                    f4kvs_bytes_free(pair.key);
+                    f4kvs_bytes_free(pair.value);
+                }
+                return e;
+            }
+        };
+        pairs.push(F4KvsKVPairKv {
+            key: key_ptr,
+            key_len,
+            value: value_ptr,
+            value_len,
+        });
+    }
+    let mut boxed = pairs.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr();
+    std::mem::forget(boxed);
+    (*result_out).pairs = ptr;
+    (*result_out).count = count;
+    F4KvsResult::Success
+}
+
 /// Fill up to `max` live prefix pairs after the last emitted key.
 ///
 /// # Safety
@@ -1715,55 +1846,70 @@ pub unsafe extern "C" fn f4kvs_engine_cursor_next_n(
         (*result_out).count = 0;
         return F4KvsResult::Success;
     }
-    let prefix = cur.prefix.clone();
-    let engine = Arc::clone(&cur.engine);
-    let mut state = match cur.state.take() {
-        Some(s) => s,
-        None => match block_on(engine.prefix_scan_start(&prefix)) {
-            Ok(s) => s,
-            Err(e) => {
-                set_last_error(&format!("Cursor start failed: {}", e));
-                return F4KvsResult::ErrorStorage;
-            }
-        },
-    };
     #[cfg(test)]
     if CURSOR_FAIL_NEXT.with(|f| f.replace(false)) {
-        cur.state = Some(state);
+        if cursor_ensure_state(cur).is_ok() {
+            // Keep state; injected failure must not rewind.
+        }
         set_last_error("Cursor next failed: injected");
         return F4KvsResult::ErrorStorage;
     }
-    let pulled = block_on(async {
-        let mut items = Vec::new();
-        let mut eof = false;
-        for _ in 0..max {
-            match engine.prefix_scan_next(&mut state).await {
-                Ok(Some((k, v))) => items.push((k, v)),
-                Ok(None) => {
-                    eof = true;
-                    break;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok((items, eof))
-    });
-    match pulled {
+    match cursor_pull_page(cur, max) {
         Ok((items, eof)) => {
             cur.done = eof;
-            if !eof {
-                cur.state = Some(state);
-            }
             fill_scan_result(items, result_out)
         }
-        Err(e) => {
-            // Keep the scan head. Dropping it rewound the next call to
-            // prefix_scan_start and re-emitted already-returned keys.
-            cur.state = Some(state);
-            set_last_error(&format!("Cursor next failed: {}", e));
-            F4KvsResult::ErrorStorage
-        }
+        Err(e) => e,
     }
+}
+
+/// Length-prefixed cursor page. Free with `f4kvs_scan_result_kv_free`.
+///
+/// # Safety
+/// `cur` from `cursor_open`. `result_out` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_cursor_next_n_kv(
+    cur: *mut F4KvsCursor,
+    max: usize,
+    result_out: *mut F4KvsScanResultKv,
+) -> F4KvsResult {
+    if cur.is_null() || result_out.is_null() {
+        set_last_error("Invalid argument: cursor or result_out is null");
+        return F4KvsResult::ErrorInvalidArgument;
+    }
+    let cur = &mut *cur;
+    if cur.done || max == 0 {
+        (*result_out).pairs = ptr::null_mut();
+        (*result_out).count = 0;
+        return F4KvsResult::Success;
+    }
+    match cursor_pull_page(cur, max) {
+        Ok((items, eof)) => {
+            cur.done = eof;
+            fill_scan_result_kv(items, result_out)
+        }
+        Err(e) => e,
+    }
+}
+
+/// # Safety
+/// `result` from `f4kvs_engine_cursor_next_n_kv`.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_scan_result_kv_free(result: *mut F4KvsScanResultKv) {
+    if result.is_null() {
+        return;
+    }
+    let scan = &mut *result;
+    if !scan.pairs.is_null() && scan.count > 0 {
+        let pairs = std::slice::from_raw_parts_mut(scan.pairs, scan.count);
+        for pair in pairs {
+            f4kvs_bytes_free(pair.key);
+            f4kvs_bytes_free(pair.value);
+        }
+        let _ = Box::from_raw(std::slice::from_raw_parts_mut(scan.pairs, scan.count));
+    }
+    scan.pairs = ptr::null_mut();
+    scan.count = 0;
 }
 
 /// # Safety
@@ -1772,6 +1918,73 @@ pub unsafe extern "C" fn f4kvs_engine_cursor_next_n(
 pub unsafe extern "C" fn f4kvs_engine_cursor_free(cur: *mut F4KvsCursor) {
     if !cur.is_null() {
         drop(Box::from_raw(cur));
+    }
+}
+
+/// Visit every live prefix pair. Pointers passed to `cb` are valid only for
+/// that call. Non-zero from `cb` stops the scan.
+///
+/// # Safety
+/// `engine` live. `cb` must be valid for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn f4kvs_engine_scan_prefix_cb(
+    engine: *mut F4KvsEngine,
+    prefix: *const u8,
+    prefix_len: usize,
+    cb: Option<unsafe extern "C" fn(usize, *const u8, usize, *const u8, usize) -> c_int>,
+    user: usize,
+) -> F4KvsResult {
+    let Some(cb) = cb else {
+        set_last_error("Invalid argument: cb is null");
+        return F4KvsResult::ErrorInvalidArgument;
+    };
+    let engine_ref = match validate_engine(engine) {
+        Ok(e) => e,
+        Err(e) => return e,
+    };
+    let prefix_str = match key_from_raw(prefix, prefix_len, "prefix") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let visit = |k: &[u8], v: &[u8]| cb(user, k.as_ptr(), k.len(), v.as_ptr(), v.len()) == 0;
+    match engine_ref
+        .engine
+        .try_prefix_scan_foreach_sync(prefix_str, visit)
+    {
+        Some(Ok(())) => F4KvsResult::Success,
+        Some(Err(e)) => {
+            set_last_error(&format!("Scan prefix cb failed: {}", e));
+            F4KvsResult::ErrorStorage
+        }
+        None => {
+            let mut st = match block_on(engine_ref.engine.prefix_scan_start(prefix_str)) {
+                Ok(s) => s,
+                Err(e) => {
+                    set_last_error(&format!("Scan prefix cb start failed: {}", e));
+                    return F4KvsResult::ErrorStorage;
+                }
+            };
+            loop {
+                match block_on(engine_ref.engine.prefix_scan_next(&mut st)) {
+                    Ok(Some((k, v))) => {
+                        let payload: &[u8] = match &v {
+                            Value::Bytes(b) => b.as_slice(),
+                            Value::String(s) => s.as_bytes(),
+                            _ => continue,
+                        };
+                        if !visit(k.as_bytes(), payload) {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        set_last_error(&format!("Scan prefix cb failed: {}", e));
+                        return F4KvsResult::ErrorStorage;
+                    }
+                }
+            }
+            F4KvsResult::Success
+        }
     }
 }
 

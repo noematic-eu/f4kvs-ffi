@@ -417,13 +417,7 @@ fn test_concurrent_gets_same_engine_kv() {
 
         let key = b"shared-key";
         let val = b"shared-value";
-        let put = f4kvs_engine_put_kv(
-            engine,
-            key.as_ptr(),
-            key.len(),
-            val.as_ptr(),
-            val.len(),
-        );
+        let put = f4kvs_engine_put_kv(engine, key.as_ptr(), key.len(), val.as_ptr(), val.len());
         assert_eq!(put, F4KvsResult::Success);
         assert_eq!(f4kvs_engine_flush(engine), F4KvsResult::Success);
 

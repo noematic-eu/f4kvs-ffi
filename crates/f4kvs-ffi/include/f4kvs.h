@@ -153,6 +153,20 @@ typedef struct {
     size_t count;
 } F4KvsScanResult;
 
+/** Length-prefixed scan pair. Free key and value with f4kvs_bytes_free(). */
+typedef struct {
+    uint8_t *key;
+    size_t key_len;
+    uint8_t *value;
+    size_t value_len;
+} F4KvsKVPairKv;
+
+/** Container for f4kvs_engine_cursor_next_n_kv. Free with f4kvs_scan_result_kv_free(). */
+typedef struct {
+    F4KvsKVPairKv *pairs;
+    size_t count;
+} F4KvsScanResultKv;
+
 /**
  * Create a new engine in a temporary data directory.
  * @return Engine handle, or NULL on failure (see f4kvs_get_last_error()).
@@ -331,7 +345,18 @@ F4KvsResult f4kvs_engine_scan_prefix_keys_kv(F4KvsEngine *engine, const uint8_t 
 typedef struct F4KvsCursor F4KvsCursor;
 F4KvsCursor *f4kvs_engine_cursor_open(F4KvsEngine *engine, const uint8_t *prefix, size_t prefix_len);
 F4KvsResult f4kvs_engine_cursor_next_n(F4KvsCursor *cur, size_t max, F4KvsScanResult *result_out);
+F4KvsResult f4kvs_engine_cursor_next_n_kv(F4KvsCursor *cur, size_t max, F4KvsScanResultKv *result_out);
+void f4kvs_scan_result_kv_free(F4KvsScanResultKv *result);
 void f4kvs_engine_cursor_free(F4KvsCursor *cur);
+
+/**
+ * Visit every live prefix pair. key/value pointers are valid only during cb.
+ * Return non-zero from cb to stop. user is an opaque handle for the caller.
+ */
+typedef int (*F4KvsScanCb)(uintptr_t user, const uint8_t *key, size_t key_len,
+                           const uint8_t *value, size_t value_len);
+F4KvsResult f4kvs_engine_scan_prefix_cb(F4KvsEngine *engine, const uint8_t *prefix,
+                                        size_t prefix_len, F4KvsScanCb cb, uintptr_t user);
 
 #ifdef __cplusplus
 }

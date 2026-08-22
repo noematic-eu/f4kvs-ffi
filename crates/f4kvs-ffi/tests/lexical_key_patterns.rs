@@ -38,7 +38,14 @@ fn test_lexical_key_patterns() {
             br#"{"id":"contract-1","fields":{"body":"liability"}}"#,
         );
         put_bytes(engine, "lex:df:liability", &[0, 0, 0, 1]);
-        put_bytes(engine, "lex:post:liability", &[0, 0, 0, 1, 0, 11, b'c', b'o', b'n', b't', b'r', b'a', b'c', b't', b'-', b'1', 1, 4, b'b', b'o', b'd', b'y', 0, 0, 0, 1]);
+        put_bytes(
+            engine,
+            "lex:post:liability",
+            &[
+                0, 0, 0, 1, 0, 11, b'c', b'o', b'n', b't', b'r', b'a', b'c', b't', b'-', b'1', 1,
+                4, b'b', b'o', b'd', b'y', 0, 0, 0, 1,
+            ],
+        );
 
         assert_eq!(
             get_bytes(engine, "chunk:contract-1"),
@@ -69,16 +76,9 @@ fn test_lexical_key_patterns() {
         let result = f4kvs_engine_get(engine, del_key.as_ptr(), &mut value_out);
         assert_eq!(result, F4KvsResult::ErrorNotFound);
 
-        let batch_keys = [
-            to_c_string("lex:post:liability"),
-            to_c_string("lex:meta"),
-        ];
+        let batch_keys = [to_c_string("lex:post:liability"), to_c_string("lex:meta")];
         let key_ptrs: Vec<*const c_char> = batch_keys.iter().map(|k| k.as_ptr()).collect();
-        let result = f4kvs_engine_batch_delete(
-            engine,
-            key_ptrs.as_ptr(),
-            batch_keys.len(),
-        );
+        let result = f4kvs_engine_batch_delete(engine, key_ptrs.as_ptr(), batch_keys.len());
         assert_eq!(result, F4KvsResult::Success);
 
         let chunk_key = to_c_string("chunk:contract-1");

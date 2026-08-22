@@ -255,13 +255,7 @@ fn test_binary_kv_roundtrip_no_hex() {
 
         let key = b"catalogs/1/6/dir\xC3\xA9"; // UTF-8 "é", not hex
         let val = b"\x00\x01\x02raw";
-        let put = f4kvs_engine_put_kv(
-            engine,
-            key.as_ptr(),
-            key.len(),
-            val.as_ptr(),
-            val.len(),
-        );
+        let put = f4kvs_engine_put_kv(engine, key.as_ptr(), key.len(), val.as_ptr(), val.len());
         assert_eq!(put, F4KvsResult::Success);
 
         let mut out: *mut u8 = std::ptr::null_mut();
@@ -273,13 +267,7 @@ fn test_binary_kv_roundtrip_no_hex() {
         assert_eq!(got, val);
         f4kvs_bytes_free(out);
 
-        let missing = f4kvs_engine_get_kv(
-            engine,
-            b"nope".as_ptr(),
-            4,
-            &mut out,
-            &mut n,
-        );
+        let missing = f4kvs_engine_get_kv(engine, b"nope".as_ptr(), 4, &mut out, &mut n);
         assert_eq!(missing, F4KvsResult::ErrorNotFound);
 
         f4kvs_engine_free(engine);
@@ -319,6 +307,95 @@ fn test_cursor_pages_in_order() {
         );
         assert_eq!(result.count, 0);
         f4kvs_engine_cursor_free(cur);
+        f4kvs_engine_free(engine);
+    }
+}
+
+#[test]
+fn test_cursor_next_n_kv_pages() {
+    unsafe {
+        let engine = f4kvs_engine_new();
+        assert!(!engine.is_null());
+        for i in 0..10 {
+            let k = format!("q/{i:02}");
+            let v = format!("v{i}");
+            let put = f4kvs_engine_put_kv(engine, k.as_ptr(), k.len(), v.as_ptr(), v.len());
+            assert_eq!(put, F4KvsResult::Success);
+        }
+        let prefix = b"q/";
+        let cur = f4kvs_engine_cursor_open(engine, prefix.as_ptr(), prefix.len());
+        assert!(!cur.is_null());
+        let mut result = std::mem::zeroed::<F4KvsScanResultKv>();
+        assert_eq!(
+            f4kvs_engine_cursor_next_n_kv(cur, 3, &mut result),
+            F4KvsResult::Success
+        );
+        assert_eq!(result.count, 3);
+        let first = &*result.pairs;
+        let key = std::slice::from_raw_parts(first.key, first.key_len);
+        assert_eq!(key, b"q/00");
+        f4kvs_scan_result_kv_free(&mut result);
+        assert_eq!(
+            f4kvs_engine_cursor_next_n_kv(cur, 100, &mut result),
+            F4KvsResult::Success
+        );
+        assert_eq!(result.count, 7);
+        f4kvs_scan_result_kv_free(&mut result);
+        assert_eq!(
+            f4kvs_engine_cursor_next_n_kv(cur, 10, &mut result),
+            F4KvsResult::Success
+        );
+        assert_eq!(result.count, 0);
+        f4kvs_engine_cursor_free(cur);
+        f4kvs_engine_free(engine);
+    }
+}
+
+unsafe extern "C" fn count_cb(
+    user: usize,
+    key: *const u8,
+    key_len: usize,
+    _val: *const u8,
+    _val_len: usize,
+) -> std::os::raw::c_int {
+    let n = user as *mut usize;
+    *n += 1;
+    if key_len < 2 {
+        return 1;
+    }
+    let k = std::slice::from_raw_parts(key, key_len);
+    if !k.starts_with(b"c/") {
+        return 1;
+    }
+    0
+}
+
+#[test]
+fn test_scan_prefix_cb() {
+    unsafe {
+        let engine = f4kvs_engine_new();
+        assert!(!engine.is_null());
+        for i in 0..8 {
+            let k = format!("c/{i}");
+            let v = b"x";
+            assert_eq!(
+                f4kvs_engine_put_kv(engine, k.as_ptr(), k.len(), v.as_ptr(), v.len()),
+                F4KvsResult::Success
+            );
+        }
+        let mut n: usize = 0;
+        let prefix = b"c/";
+        assert_eq!(
+            f4kvs_engine_scan_prefix_cb(
+                engine,
+                prefix.as_ptr(),
+                prefix.len(),
+                Some(count_cb),
+                &mut n as *mut usize as usize,
+            ),
+            F4KvsResult::Success
+        );
+        assert_eq!(n, 8);
         f4kvs_engine_free(engine);
     }
 }
